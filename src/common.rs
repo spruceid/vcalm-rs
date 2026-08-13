@@ -1,0 +1,441 @@
+// use url::Url;
+
+// uniffi::custom_newtype!(CredentialType, String);
+// #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+// pub struct CredentialType(pub String);
+
+// impl From<String> for CredentialType {
+//     fn from(s: String) -> Self {
+//         Self(s)
+//     }
+// }
+
+// impl From<CredentialType> for String {
+//     fn from(cred_type: CredentialType) -> Self {
+//         cred_type.0
+//     }
+// }
+
+// uniffi::custom_type!(Uuid, String, {
+//     remote,
+//     try_lift: |uuid| Ok(uuid.parse()?),
+//     lower: |uuid| uuid.to_string(),
+// });
+
+#[cfg(feature = "uniffi")]
+uniffi::custom_type!(Url, String, {
+    remote,
+    try_lift: |url|  Ok(Url::parse(&url)?),
+    lower: |url| url.to_string(),
+});
+
+// pub use mobile_toolkit::common::{Key, Value};
+
+// uniffi::custom_type!(Algorithm, String, {
+//     remote,
+//     try_lift: |alg| {
+// match alg.as_ref() {
+//     "ES256" => Ok(Algorithm::ES256),
+//     "ES256K" => Ok(Algorithm::ES256K),
+//     _ => anyhow::bail!("unsupported uniffi custom type for Algorithm mapping: {alg}"),
+// }
+//     },
+//     lower: |alg| alg.to_string(),
+// });
+
+// uniffi::custom_type!(CryptosuiteString, String, {
+//     remote,
+//     try_lift: |suite| {
+//         CryptosuiteString::new(suite)
+//             .map_err(|e| uniffi::deps::anyhow::anyhow!("failed to create cryptosuite: {e:?}"))
+//     },
+//     lower: |suite| suite.to_string(),
+// });
+
+// #[derive(uniffi::Object, Debug, Clone)]
+// pub struct CborTag {
+//     id: u64,
+//     value: Box<CborValue>,
+// }
+
+// #[uniffi::export]
+// impl CborTag {
+//     pub fn id(&self) -> u64 {
+//         self.id
+//     }
+
+//     pub fn value(&self) -> CborValue {
+//         *self.value.clone()
+//     }
+// }
+
+// impl From<(u64, serde_cbor::Value)> for CborTag {
+//     fn from(value: (u64, serde_cbor::Value)) -> Self {
+//         Self {
+//             id: value.0,
+//             value: Box::new(value.1.into()),
+//         }
+//     }
+// }
+
+// impl std::fmt::Display for CborValue {
+//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//         match self {
+//             CborValue::Null => write!(f, ""),
+//             CborValue::Bool(v) => write!(f, "{v}"),
+//             CborValue::Integer(cbor_integer) => write!(f, "{}", cbor_integer.to_text()),
+//             CborValue::Float(v) => write!(f, "{v}"),
+//             CborValue::Bytes(items) => items.iter().enumerate().try_fold((), |_, (i, item)| {
+//                 if i > 0 {
+//                     write!(f, ",")?;
+//                 }
+//                 write!(f, "{item}")
+//             }),
+//             CborValue::Text(v) => write!(f, "{v}"),
+//             CborValue::Array(cbor_values) => {
+//                 cbor_values
+//                     .iter()
+//                     .enumerate()
+//                     .try_fold((), |_, (i, value)| {
+//                         if i > 0 {
+//                             write!(f, ",")?;
+//                         }
+//                         write!(f, "{value}")
+//                     })
+//             }
+//             CborValue::ItemMap(hash_map) => {
+//                 write!(f, "{{")?;
+//                 hash_map.iter().enumerate().try_fold((), |_, (i, (k, v))| {
+//                     if i > 0 {
+//                         write!(f, ",")?;
+//                     }
+//                     write!(f, r#""{k}":"{v}""#)
+//                 })?;
+//                 write!(f, "}}")
+//             }
+//             CborValue::Tag(cbor_tag) => write!(f, "{}", cbor_tag.value()),
+//         }
+//     }
+// }
+
+// #[derive(uniffi::Object, Debug, Clone)]
+// pub struct CborInteger {
+//     bytes: Vec<u8>,
+// }
+
+// #[uniffi::export]
+// impl CborInteger {
+//     pub fn lower_bytes(&self) -> u64 {
+//         self.bytes[8..16]
+//             .iter()
+//             .rev()
+//             .enumerate()
+//             .fold(0, |acc, (i, value)| acc | ((*value as u64) << (i * 8)))
+//     }
+
+//     pub fn upper_bytes(&self) -> u64 {
+//         self.bytes[0..8]
+//             .iter()
+//             .rev()
+//             .enumerate()
+//             .fold(0, |acc, (i, value)| acc | ((*value as u64) << (i * 8)))
+//     }
+
+//     pub fn to_text(&self) -> String {
+//         let lower = self.lower_bytes();
+//         let upper = self.upper_bytes();
+
+//         // Safety: we are doing all the operations from splitting to joining
+//         u128::cast_signed(((upper as u128) << 64) | (lower as u128)).to_string()
+//     }
+// }
+
+// impl From<i128> for CborInteger {
+//     fn from(value: i128) -> Self {
+//         Self {
+//             bytes: vec![
+//                 (value >> 120) as u8,
+//                 (value >> 112) as u8,
+//                 (value >> 104) as u8,
+//                 (value >> 96) as u8,
+//                 (value >> 88) as u8,
+//                 (value >> 80) as u8,
+//                 (value >> 72) as u8,
+//                 (value >> 64) as u8,
+//                 (value >> 56) as u8,
+//                 (value >> 48) as u8,
+//                 (value >> 40) as u8,
+//                 (value >> 32) as u8,
+//                 (value >> 24) as u8,
+//                 (value >> 16) as u8,
+//                 (value >> 8) as u8,
+//                 (value) as u8,
+//             ],
+//         }
+//     }
+// }
+
+// impl From<CborInteger> for i128 {
+//     fn from(value: CborInteger) -> Self {
+//         i128::from_be_bytes(value.bytes.try_into().unwrap_or([0; 16]))
+//     }
+// }
+
+// #[derive(uniffi::Enum, Debug, Clone)]
+// pub enum CborValue {
+//     Null,
+//     Bool(bool),
+//     Integer(Arc<CborInteger>),
+//     Float(f64),
+//     Bytes(Vec<u8>),
+//     Text(String),
+//     Array(Vec<CborValue>),
+//     ItemMap(HashMap<String, CborValue>),
+//     Tag(Arc<CborTag>),
+// }
+
+// impl From<serde_cbor::Value> for CborValue {
+//     fn from(value: serde_cbor::Value) -> Self {
+//         match value {
+//             serde_cbor::Value::Null => Self::Null,
+//             serde_cbor::Value::Bool(b) => Self::Bool(b),
+//             serde_cbor::Value::Integer(v) => Self::Integer(Arc::new(v.into())),
+//             serde_cbor::Value::Float(v) => Self::Float(v),
+//             serde_cbor::Value::Bytes(b) => Self::Bytes(b),
+//             serde_cbor::Value::Text(s) => Self::Text(s),
+//             serde_cbor::Value::Array(a) => {
+//                 Self::Array(a.iter().map(|o| Into::<Self>::into(o.clone())).collect())
+//             }
+//             serde_cbor::Value::Map(m) => Self::ItemMap(
+//                 m.into_iter()
+//                     .map(|(k, v)| (CborValue::from(k).to_string(), v.into()))
+//                     .collect::<HashMap<_, CborValue>>(),
+//             ),
+//             serde_cbor::Value::Tag(id, value) => Self::Tag(Arc::new((id, *value).into())),
+//             _ => Self::Null,
+//         }
+//     }
+// }
+
+// impl From<CborValue> for serde_json::Value {
+//     fn from(value: CborValue) -> Self {
+//         match value {
+//             CborValue::Null => Self::Null,
+//             CborValue::Bool(b) => Self::Bool(b),
+//             CborValue::Integer(v) => {
+//                 let int_val = i128::from(v.deref().clone());
+//                 if let Ok(i64_val) = i64::try_from(int_val) {
+//                     Self::Number(serde_json::Number::from(i64_val))
+//                 } else {
+//                     Self::String(int_val.to_string())
+//                 }
+//             }
+//             CborValue::Float(v) => {
+//                 if let Some(num) = serde_json::Number::from_f64(v) {
+//                     Self::Number(num)
+//                 } else {
+//                     Self::Null
+//                 }
+//             }
+//             CborValue::Bytes(b) => Self::Array(
+//                 b.into_iter()
+//                     .map(|byte| Self::Number(serde_json::Number::from(byte)))
+//                     .collect(),
+//             ),
+//             CborValue::Text(s) => Self::String(s),
+//             CborValue::Array(a) => Self::Array(a.into_iter().map(Into::<Self>::into).collect()),
+//             CborValue::ItemMap(m) => {
+//                 let map = m
+//                     .into_iter()
+//                     .map(|(k, v)| (k, v.into()))
+//                     .collect::<serde_json::Map<String, serde_json::Value>>();
+//                 Self::Object(map)
+//             }
+//             CborValue::Tag(tag) => {
+//                 let mut map = serde_json::Map::new();
+//                 map.insert(
+//                     "tag".to_string(),
+//                     Self::Number(serde_json::Number::from(tag.id)),
+//                 );
+//                 map.insert("value".to_string(), tag.value().into());
+//                 Self::Object(map)
+//             }
+//         }
+//     }
+// }
+
+// impl PartialEq for CborValue {
+//     fn eq(&self, other: &CborValue) -> bool {
+//         self.cmp(other) == Ordering::Equal
+//     }
+// }
+
+// impl Eq for CborValue {}
+
+// impl PartialOrd for CborValue {
+//     fn partial_cmp(&self, other: &CborValue) -> Option<Ordering> {
+//         Some(self.cmp(other))
+//     }
+// }
+
+// impl Ord for CborValue {
+//     fn cmp(&self, other: &CborValue) -> Ordering {
+//         use self::CborValue::*;
+//         if self.major_type() != other.major_type() {
+//             return self.major_type().cmp(&other.major_type());
+//         }
+//         match (self, other) {
+//             (Null, Null) => Ordering::Equal,
+//             (Bool(a), Bool(b)) => a.cmp(b),
+//             (Integer(a), Integer(b)) => {
+//                 i128::from(a.deref().clone()).cmp(&i128::from(b.deref().clone()))
+//             }
+//             (Float(a), Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+//             (Bytes(a), Bytes(b)) => a.cmp(b),
+//             (Text(a), Text(b)) => a.cmp(b),
+//             (Array(a), Array(b)) => a.iter().cmp(b.iter()),
+//             (ItemMap(a), ItemMap(b)) => a.len().cmp(&b.len()).then_with(|| a.iter().cmp(b.iter())),
+//             (Tag(a), Tag(b)) => a.id.cmp(&b.id).then_with(|| a.value.cmp(&b.value)),
+//             _ => unreachable!("major_type comparison should have caught this case"),
+//         }
+//     }
+// }
+
+// impl CborValue {
+//     fn major_type(&self) -> u8 {
+//         use self::CborValue::*;
+//         match self {
+//             Null => 7,
+//             Bool(_) => 7,
+//             Integer(v) => {
+//                 if i128::from(v.as_ref().clone()) >= 0 {
+//                     0
+//                 } else {
+//                     1
+//                 }
+//             }
+//             Tag(_) => 6,
+//             Float(_) => 7,
+//             Bytes(_) => 2,
+//             Text(_) => 3,
+//             Array(_) => 4,
+//             ItemMap(_) => 5,
+//         }
+//     }
+// }
+
+// // CBOR key constants - generic names for reusability
+// pub mod cbor_keys {
+//     // Standard CBOR claims
+//     pub const ISSUER: i128 = 1;
+//     pub const EXPIRES: i128 = 4;
+//     pub const NOT_BEFORE: i128 = 5;
+//     pub const ISSUED: i128 = 6;
+
+//     // Identity/Personal Info (70001-70010)
+//     pub const FULL_NAME: i128 = -70001;
+//     pub const EMAIL: i128 = -70002;
+//     pub const COMPANY: i128 = -70003;
+
+//     // Birth Certificate fields (70011-70020)
+//     pub const BIRTH_CERT_NUMBER: i128 = -70011;
+//     pub const GIVEN_NAMES: i128 = -70012;
+//     pub const FAMILY_NAME: i128 = -70013;
+//     pub const BIRTH_DATE: i128 = -70014;
+//     pub const SEX: i128 = -70015;
+//     pub const BIRTH_LOCALITY: i128 = -70016;
+//     pub const COUNTY_FIPS_CODE: i128 = -70017;
+//     pub const MOTHER: i128 = -70018;
+//     pub const FATHER: i128 = -70019;
+//     pub const REGISTRATION_DATE: i128 = -70020;
+// }
+
+// /// Bidirectional mapping between CBOR keys and human-readable strings
+// pub struct CborKeyMapper;
+
+// impl CborKeyMapper {
+//     /// Convert CBOR integer key to human-readable string
+//     pub fn key_to_string(key: i128) -> String {
+//         match key {
+//             // Standard CBOR claims
+//             cbor_keys::ISSUER => "Issuer".to_string(),
+//             cbor_keys::EXPIRES => "Expires".to_string(),
+//             cbor_keys::NOT_BEFORE => "Not Before".to_string(),
+//             cbor_keys::ISSUED => "Issued".to_string(),
+
+//             // Identity/Personal Info
+//             cbor_keys::FULL_NAME => "Full Name".to_string(),
+//             cbor_keys::EMAIL => "Email".to_string(),
+//             cbor_keys::COMPANY => "Company".to_string(),
+
+//             // Birth Certificate fields
+//             cbor_keys::BIRTH_CERT_NUMBER => "birthCertificateNumber".to_string(),
+//             cbor_keys::GIVEN_NAMES => "Given Names".to_string(),
+//             cbor_keys::FAMILY_NAME => "Family Name".to_string(),
+//             cbor_keys::BIRTH_DATE => "Birth Date".to_string(),
+//             cbor_keys::SEX => "Sex".to_string(),
+//             cbor_keys::BIRTH_LOCALITY => "Birth Locality".to_string(),
+//             cbor_keys::COUNTY_FIPS_CODE => "County FIPS Code".to_string(),
+//             cbor_keys::MOTHER => "Mother".to_string(),
+//             cbor_keys::FATHER => "Father".to_string(),
+//             cbor_keys::REGISTRATION_DATE => "Registration Date".to_string(),
+
+//             _ => key.to_string(),
+//         }
+//     }
+
+//     /// Convert human-readable string to CBOR integer key (if exists)
+//     pub fn string_to_key(key_str: &str) -> Option<i128> {
+//         match key_str {
+//             // Standard CBOR claims
+//             "Expires" => Some(cbor_keys::EXPIRES),
+//             "Not Before" => Some(cbor_keys::NOT_BEFORE),
+//             "Issued" => Some(cbor_keys::ISSUED),
+
+//             // Identity/Personal Info
+//             "Full Name" => Some(cbor_keys::FULL_NAME),
+//             "Email" => Some(cbor_keys::EMAIL),
+//             "Company" => Some(cbor_keys::COMPANY),
+
+//             // Birth Certificate fields
+//             "Birth Certificate Number" => Some(cbor_keys::BIRTH_CERT_NUMBER),
+//             "Given Names" => Some(cbor_keys::GIVEN_NAMES),
+//             "Family Name" => Some(cbor_keys::FAMILY_NAME),
+//             "Birth Date" => Some(cbor_keys::BIRTH_DATE),
+//             "Sex" => Some(cbor_keys::SEX),
+//             "Birth Locality" => Some(cbor_keys::BIRTH_LOCALITY),
+//             "County FIPS Code" => Some(cbor_keys::COUNTY_FIPS_CODE),
+//             "Mother" => Some(cbor_keys::MOTHER),
+//             "Father" => Some(cbor_keys::FATHER),
+//             "Registration Date" => Some(cbor_keys::REGISTRATION_DATE),
+
+//             _ => None,
+//         }
+//     }
+// }
+
+// #[uniffi::export]
+// /// Converts a base-10 numeric string to a raw byte array.
+// pub fn base10_string_to_bytes_num(base10_str: String) -> Option<Vec<u8>> {
+//     // num-bigint expects a potential sign, but for data encoding, we assume positive numbers.
+//     let big_int = match BigInt::from_str(&base10_str) {
+//         Ok(num) => num,
+//         Err(_) => return None, // Return None if parsing fails
+//     };
+
+//     // Convert BigInt into a raw byte vector (using big-endian for standard network order)
+//     // The to_bytes_be() method returns a tuple (Sign, Vec<u8>).
+//     let (_, bytes) = big_int.to_bytes_be();
+
+//     Some(bytes)
+// }
+
+// #[uniffi::export]
+// /// Converts a byte array back to a base-10 numeric string.
+// pub fn bytes_to_base10_string_num(bytes: Vec<u8>) -> String {
+//     // Reconstruct the BigInt from bytes using BigEndian order and positive sign.
+//     let big_int = BigInt::from_bytes_be(Sign::Plus, &bytes);
+
+//     // Convert the BigInt back to a decimal string representation.
+//     big_int.to_string()
+// }

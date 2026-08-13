@@ -1,0 +1,60 @@
+[workspace.dependencies]
+# Pinned: 0.31.2 breaks checksum validation on Android arm64 devices
+# (https://github.com/mozilla/uniffi-rs/issues/2939). Unpin once a fixed
+# release ships.
+uniffi = "=0.31.1"
+
+[package]
+name = "vcalm-rs"
+version = "0.1.0"
+edition = "2024"
+authors = ["Spruce Systems, Inc."]
+license = "MIT OR Apache-2.0"
+description = "Verifiable Credential API for Lifecycle Management"
+repository = "https://github.com/spruceid/vcalm-rs/"
+
+[dependencies]
+async-trait = "0.1"
+futures = "0.3"
+log = { version = "0.4", features = ["std", "serde"] }
+# Only for normalizing ECDSA signatures to the raw r‖s encoding that
+# ecdsa-rdfc-2019 requires -- see crypto_utils.
+p256 = { version = "0.13.2", features = ["pkcs8"] }
+# "json" is explicit here where sprucekit-mobile got it for free: another crate
+# in its graph enabled the feature, and cargo unified it. Standalone, nothing
+# else turns it on, so RequestBuilder::json would not exist.
+reqwest = { version = "0.12.5", features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1.0.204", features = ["derive"] }
+serde_json = "1.0.111"
+ssi = { version = "0.14", features = ["secp256r1", "secp384r1"] }
+thiserror = "1.0.65"
+tokio = { version = "1", features = ["rt", "sync"] }
+tracing = "0.1.40"
+uniffi = { workspace = true, features = ["cli", "tokio"], optional = true }
+url = { version = "2.5", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+[features]
+default = []
+# Generate UniFFI scaffolding and derive the FFI traits on the wire types.
+#
+# Off by default so pure-Rust consumers are not forced onto the exact
+# `uniffi = "=0.31.1"` pin -- cross-crate UniFFI type unification requires every
+# crate in the graph to agree on the version, which would otherwise make this
+# crate impossible to depend on from a project already using a different one.
+#
+# Note that `VcalmHolder<C>` is generic and therefore cannot be a
+# `uniffi::Object`. Enabling this exports the wire records, enums and error type
+# only; the holder itself needs a monomorphized wrapper in the consuming crate.
+uniffi = ["dep:uniffi"]
+
+[dev-dependencies]
+# `macros` + `rt-multi-thread` are for #[tokio::test]; the non-dev tokio
+# dependency only needs the pieces big_stack uses.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync"] }
+wiremock = "0.6.3"
+
+[patch.crates-io]
+ssi = { git = "https://github.com/spruceid/ssi", branch = "fix/multiproof-select-0.14" }
+ssi-jwk = { git = "https://github.com/spruceid/ssi", branch = "fix/multiproof-select-0.14" }
+ssi-jws = { git = "https://github.com/spruceid/ssi", branch = "fix/multiproof-select-0.14" }
