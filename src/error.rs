@@ -1,6 +1,5 @@
 /// Errors that can occur while driving a VCALM `vcapi` exchange.
 #[derive(thiserror::Error, Debug)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 pub enum VcalmError {
     /// An unexpected foreign-callback error occurred across the FFI boundary.
     #[error("An unexpected foreign callback error occurred: {0}")]
@@ -27,19 +26,6 @@ pub enum VcalmError {
     ServerError { status: u16, body: String },
 
     /// A host capability (storage, signing, or the JSON-LD engine) failed.
-    ///
-    /// Replaces the per-subsystem variants this enum used to reserve for
-    /// sprucekit's `VdcCollectionError`, `VerificationError`,
-    /// `CredentialDecodingError` and friends. VCALM no longer knows those types;
-    /// the adapter categorizes the failure and VCALM reports the message.
-    ///
-    /// Carries a `String` rather than the `PortError` itself: every variant of
-    /// this enum has to be FFI-representable for the `uniffi::Error` derive, and
-    /// a nested error type is not. Stringifying at the boundary keeps the rest
-    /// of the enum's variants structured — the alternative, `#[uniffi(flat_error)]`,
-    /// would flatten `MalformedProblemDetails`, `DomainChannelMismatch` and the
-    /// others into bare messages too. It also matches how `Network` and
-    /// `Deserialization` already carry their sources.
     #[error("host capability failed: {0}")]
     Port(String),
 
@@ -105,17 +91,6 @@ pub enum VcalmError {
     /// (e.g. `EnvelopedVerifiableCredential`, a `bbs-2023` base proof).
     #[error("unsupported credential format: {0}")]
     UnsupportedCredentialFormat(String),
-}
-
-// Handle unexpected errors when calling a foreign callback. Only meaningful
-// when the crate is built with FFI bindings; the `UnexpectedUniFFICallbackError`
-// variant itself stays unconditional so the enum shape does not change with the
-// feature.
-#[cfg(feature = "uniffi")]
-impl From<uniffi::UnexpectedUniFFICallbackError> for VcalmError {
-    fn from(value: uniffi::UnexpectedUniFFICallbackError) -> Self {
-        VcalmError::UnexpectedUniFFICallbackError(value.reason)
-    }
 }
 
 impl From<crate::ports::PortError> for VcalmError {

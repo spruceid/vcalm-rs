@@ -17,11 +17,6 @@ use crate::ports::VcalmSigner;
 use super::exchange::{CryptosuiteEntry, Vpr};
 
 /// Failures while assembling or signing the verifiable presentation.
-///
-/// Mirrors the variants of `sprucekit-mobile`'s `PresentationError` so the call
-/// sites below read identically, but is VCALM's own type — the SDK's version is
-/// a `uniffi::Error` bound to its binding surface, and VP signing is VCALM's
-/// own logic rather than a host capability, so it does not belong on a port.
 #[derive(Debug, thiserror::Error)]
 pub enum PresentationError {
     #[error("Error signing presentation: {0}")]
@@ -224,10 +219,7 @@ impl VpSigner {
     ///
     /// `pub` because [`VpSigner`] itself is: a `pub` struct whose only
     /// constructor is `pub(crate)` is unusable from outside the crate.
-    pub fn new(
-        signer: Arc<dyn VcalmSigner>,
-        context_map: Option<HashMap<String, String>>,
-    ) -> Self {
+    pub fn new(signer: Arc<dyn VcalmSigner>, context_map: Option<HashMap<String, String>>) -> Self {
         Self {
             signer,
             context_map,
@@ -361,7 +353,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::exchange::Vpr;
-    use crate::tests::{verify_vp, P256Signer};
+    use crate::tests::{P256Signer, verify_vp};
 
     /// The VCALM signer glue over the real P-256 test key (`did:key`,
     /// `ecdsa-rdfc-2019`). No context map: these fixtures define their terms

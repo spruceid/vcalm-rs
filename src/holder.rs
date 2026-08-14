@@ -52,7 +52,7 @@ pub(crate) struct ExchangeState {
     /// A `redirectUrl` that rode along on the Offer message (§3.6 combined
     /// properties). Surfaced as the terminal step after a successful accept,
     /// instead of an extra advance POST. Cleared alongside `current_offer`.
-    pub(crate) current_offer_redirect: Option<Url>,
+    pub(crate) current_offer_redirect: Option<String>,
 }
 
 /// A stateful VCALM holder session driving one `vcapi` exchange.
@@ -1204,7 +1204,6 @@ pub struct VcalmMatchedCredential<C> {
 /// Derived by verifying the VC's proof/claims read-only, BEFORE the user accepts, so
 /// the UI can warn about an expired/unverifiable credential up front.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum OfferedValidity {
     /// Proof verified and the validity period is current.
     Valid,
@@ -1230,7 +1229,6 @@ pub enum OfferedValidity {
 /// `credentialSubject`) plus a [`validity`](Self::validity) hint, without any storage
 /// side-effect.
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct VcalmOfferedCredential {
     /// The VC's `issuer` rendered as a string (the bare id, or the `id` of an issuer
     /// object). `None` when absent or unrecognized.
@@ -1282,7 +1280,6 @@ impl VcalmOfferedCredential {
 /// surfaces what a full-disclosure presentation will share, mirroring the
 /// `Oid4vpRequestedField` shape; it does NOT limit disclosed fields.
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct VcalmRequestedField {
     /// Index of the originating query in the VPR's `query[]` array.
     pub query_index: u32,
@@ -1708,9 +1705,9 @@ mod tests {
     use super::*;
     use crate::exchange::ProblemDetails;
     use crate::tests::{
-        embedded_vc_cryptosuite, issue_sd_base_proof, offered_vc, sd_base_offered_vc,
-        sd_base_proof_v2, signed_offered_vc, stored_credential, test_holder, test_holder_real,
-        test_holder_signed, test_holder_with, verify_vp, MemoryStore, ScriptedEngine,
+        MemoryStore, ScriptedEngine, embedded_vc_cryptosuite, issue_sd_base_proof, offered_vc,
+        sd_base_offered_vc, sd_base_proof_v2, signed_offered_vc, stored_credential, test_holder,
+        test_holder_real, test_holder_signed, test_holder_with, verify_vp,
     };
     use serde_json::json;
     use wiremock::matchers::{body_json, body_string_contains, header, method, path};
@@ -1760,7 +1757,10 @@ mod tests {
             "proof": { "type": "DataIntegrityProof", "cryptosuite": "bbs-2023" }
         });
         assert!(has_underivable_sd_base_proof(&bbs));
-        assert!(!has_sd_base_proof(&bbs), "bbs-2023 must not arm the SD gate");
+        assert!(
+            !has_sd_base_proof(&bbs),
+            "bbs-2023 must not arm the SD gate"
+        );
 
         let ecdsa_sd = json!({
             "proof": { "type": "DataIntegrityProof", "cryptosuite": "ecdsa-sd-2023" }
@@ -2436,7 +2436,11 @@ mod tests {
             .await
             .expect_err("a 5xx advance must surface");
         assert!(matches!(err, VcalmError::ServerError { status: 500, .. }));
-        assert_eq!(store.len(), 1, "the credential IS stored before the advance");
+        assert_eq!(
+            store.len(),
+            1,
+            "the credential IS stored before the advance"
+        );
         assert!(
             holder.state.lock().await.current_offer.is_some(),
             "the Offer is kept so the caller can retry"
@@ -2549,7 +2553,7 @@ mod tests {
             .expect("offer step");
         let step = holder.clone().accept_offer().await.expect("accept");
         match step {
-            StepResult::Redirect { url } => assert_eq!(url.as_str(), "https://example.com/done"),
+            StepResult::Redirect { url } => assert_eq!(url, "https://example.com/done"),
             other => panic!("expected the combined redirect surfaced, got {other:?}"),
         }
         assert_eq!(store.len(), 1, "VC stored");
@@ -2598,10 +2602,8 @@ mod tests {
         // with an explicit `drop` before it, and there are awaits below.
         let calls = engine.derive_calls.lock().unwrap().clone();
         assert!(
-            calls
-                .iter()
-                .any(|(id, ptrs)| id == "urn:uuid:sd-accept-1"
-                    && ptrs == &["/credentialSubject".to_string()]),
+            calls.iter().any(|(id, ptrs)| id == "urn:uuid:sd-accept-1"
+                && ptrs == &["/credentialSubject".to_string()]),
             "a base proof is validated by deriving a full subject reveal, got {calls:?}"
         );
 
@@ -2653,8 +2655,7 @@ mod tests {
         let matched = holder.matched_credentials().await.expect("matched");
         assert_eq!(matched[0].credentials.len(), 1);
         assert_eq!(
-            matched[0].credentials[0].credential.body["id"],
-            "urn:uuid:provided",
+            matched[0].credentials[0].credential.body["id"], "urn:uuid:provided",
             "host-provided credentials shadow the store"
         );
     }
@@ -2663,7 +2664,13 @@ mod tests {
     async fn matched_credentials_empty_is_not_error() {
         let holder = test_holder().await;
         // No VPR at all ⇒ empty, not an error.
-        assert!(holder.matched_credentials().await.expect("no vpr").is_empty());
+        assert!(
+            holder
+                .matched_credentials()
+                .await
+                .expect("no vpr")
+                .is_empty()
+        );
 
         // A VPR with no matching credential ⇒ one entry, zero hits.
         holder.state.lock().await.last_vpr = Some(qbe_vpr());
@@ -2928,7 +2935,7 @@ mod tests {
             .await
             .expect("step 3");
         match step3 {
-            StepResult::Redirect { url } => assert_eq!(url.as_str(), "https://example.com/done"),
+            StepResult::Redirect { url } => assert_eq!(url, "https://example.com/done"),
             other => panic!("expected Redirect, got {other:?}"),
         }
     }
@@ -2981,8 +2988,7 @@ mod tests {
 
         let store = MemoryStore::new();
         let (holder, signer) = test_holder_real(store.clone()).await;
-        let cred =
-            store.seed(signed_offered_vc(&signer, "urn:uuid:submit-1", "Jane").await);
+        let cred = store.seed(signed_offered_vc(&signer, "urn:uuid:submit-1", "Jane").await);
 
         let step1 = holder
             .clone()
@@ -3000,7 +3006,7 @@ mod tests {
             .await
             .expect("step 2 submit");
         match step2 {
-            StepResult::Redirect { url } => assert_eq!(url.as_str(), "https://example.com/done"),
+            StepResult::Redirect { url } => assert_eq!(url, "https://example.com/done"),
             other => panic!("expected Redirect, got {other:?}"),
         }
     }
@@ -3085,9 +3091,8 @@ mod tests {
         // FULL VP, not an error. A capability gap, not a consent violation.
         let (holder, signer) = test_holder_real(MemoryStore::new()).await;
         let vpr = sd_qbe_vpr();
-        let cred = stored_credential(
-            signed_offered_vc(&signer, "urn:uuid:sd-fallback-1", "Jane").await,
-        );
+        let cred =
+            stored_credential(signed_offered_vc(&signer, "urn:uuid:sd-fallback-1", "Jane").await);
 
         let signed = holder
             .build_and_sign_vp(&vpr, &[cred])

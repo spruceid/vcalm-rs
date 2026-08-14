@@ -4,13 +4,6 @@ use url::Url;
 
 use super::error::VcalmError;
 
-#[cfg(feature = "uniffi")]
-uniffi::custom_type!(JsonValue, String, {
-    remote,
-    try_lift: |s| Ok(serde_json::from_str(&s)?),
-    lower: |v| v.to_string(),
-});
-
 /// The symmetric `vcapi` message envelope.
 ///
 /// The same shape is sent by the holder and received from the exchange server.
@@ -111,7 +104,6 @@ where
 /// A verifiable-presentation-request. Fully typed for losslessness; QBE/query
 /// interpretation is a later phase, so query internals are kept defensively loose.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct Vpr {
     /// The presentation query/queries. §3.4.1 permits a single query object OR
@@ -141,7 +133,6 @@ pub struct Vpr {
 /// losslessly in `r#type` — an unrecognized type is unsatisfiable for matching,
 /// never an error.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct Query {
     /// The query type(s). Accepts a bare string (`"QueryByExample"`) OR an array
@@ -185,7 +176,6 @@ pub struct Query {
 /// meaning "field present, any value"). The issuer filter accepts both
 /// `acceptedIssuers` (§3.4.2) and `trustedIssuer` (alt-key).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialQuery {
     /// Human-readable reason the credential is requested.
@@ -215,7 +205,6 @@ pub struct CredentialQuery {
 /// carrying a `cryptosuite` field. `#[serde(untagged)]` is the ONLY sanctioned
 /// untagged use in this module — it is NEVER applied to the envelope.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(untagged)]
 pub enum CryptosuiteEntry {
     /// A bare cryptosuite name, e.g. `"ecdsa-rdfc-2019"`.
@@ -227,7 +216,6 @@ pub enum CryptosuiteEntry {
 /// An `acceptedEnvelopes` entry: a bare media-type string or an object carrying a
 /// `mediaType` field. Same string-or-object backward-compat shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(untagged)]
 pub enum EnvelopeEntry {
     /// A bare media-type, e.g. `"application/vp+jwt"`.
@@ -244,7 +232,6 @@ pub enum EnvelopeEntry {
 /// carrying `id`, `issuer`, or `recognizedIn`. The `{recognizedIn}` form is
 /// carried but NOT resolved — the matcher treats it as non-matching.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(untagged, rename_all = "camelCase")]
 pub enum AcceptedIssuerEntry {
     /// A bare issuer identifier, e.g. `"did:web:red-issuer.example"`.
@@ -267,7 +254,6 @@ pub enum AcceptedIssuerEntry {
 /// An `acceptedMethods` entry (§3.4.3). Same string-or-object shape: a bare DID
 /// method name, e.g. `"key"`, or an object `{"method": "key"}`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(untagged)]
 pub enum AcceptedMethodEntry {
     /// A bare method name, e.g. `"key"`.
@@ -281,7 +267,6 @@ pub enum AcceptedMethodEntry {
 /// Note: the string fields are server-provided, caller-facing data — not to be
 /// logged verbatim at info level.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ProblemDetails {
     /// The problem type URI/identifier. §3.8: MUST be present.
     #[serde(rename = "type")]
@@ -302,7 +287,6 @@ pub struct ProblemDetails {
 /// every server reply. `serde` is derived only for the round-trip unit tests; the
 /// actual wire types are [`VcapiMessage`]/[`ProblemDetails`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "step")]
 pub enum StepResult {
     /// The server requests a verifiable presentation; the caller should respond.
@@ -314,10 +298,22 @@ pub enum StepResult {
     Offer {
         vcs: serde_json::Value,
         next_vpr: Option<Vpr>,
-        redirect_url: Option<Url>,
+        redirect_url: Option<String>,
     },
     /// A terminal redirect target. Surfaced as data — NEVER auto-followed.
-    Redirect { url: Url },
+    ///
+    /// A `String`, not a `url::Url`, deliberately. This enum crosses the FFI
+    /// boundary, and a `Url` field would require `uniffi::custom_type!(Url, …)`
+    /// here — which collides with the identical registration in any host that
+    /// also uses `Url` (`mobile-sdk-rs` does), because UniFFI emits one
+    /// `typealias Url = String` per registration into a shared Swift module. A
+    /// crate designed to be embedded should register as few third-party types as
+    /// possible.
+    ///
+    /// Nothing is lost: the value is still validated by `Url::parse` in
+    /// [`classify`] before it reaches here, and the generated bindings are
+    /// byte-identical because `Url` was only ever `String` on the wire.
+    Redirect { url: String },
     /// The exchange completed successfully with no further action.
     Complete,
     /// The server returned an RFC 9457 problem (a surfaced 4xx, NOT an error).
@@ -354,9 +350,11 @@ pub fn classify(status: reqwest::StatusCode, body: &str) -> Result<StepResult, V
         };
 
         // Lazy redirect parse — see the doc comment for the failure policy.
+        // Parsed for validation, then kept as a string: `StepResult` carries a
+        // `String` so it does not have to register `Url` as a custom FFI type.
         let redirect = match message.redirect_url.as_deref().map(Url::parse) {
             None => None,
-            Some(Ok(url)) => Some(url),
+            Some(Ok(url)) => Some(url.to_string()),
             Some(Err(e)) => {
                 if message.verifiable_presentation.is_none() {
                     return Err(VcalmError::Deserialization(format!(
@@ -808,10 +806,10 @@ mod tests {
                         domain: Some("d".into()),
                         ..Default::default()
                     }),
-                    redirect_url: Some(Url::parse("https://example.com/done").unwrap()),
+                    redirect_url: Some("https://example.com/done".to_string()),
                 },
                 StepResult::Redirect {
-                    url: Url::parse("https://example.com/done").unwrap(),
+                    url: "https://example.com/done".to_string(),
                 },
                 StepResult::Complete,
                 StepResult::Problem {
@@ -923,10 +921,7 @@ mod tests {
                 } => {
                     assert_eq!(vcs, json!({"vp": "opaque"}));
                     assert!(next_vpr.is_none());
-                    assert_eq!(
-                        redirect_url.map(|u| u.to_string()).as_deref(),
-                        Some("https://example.com/done")
-                    );
+                    assert_eq!(redirect_url.as_deref(), Some("https://example.com/done"));
                 }
                 other => panic!("expected Offer, got {other:?}"),
             }

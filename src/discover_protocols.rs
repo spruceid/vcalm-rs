@@ -1,35 +1,3 @@
-//! Protocol discovery for an `interaction:` initiation (§3.7.4).
-//!
-//! # TODO: share this with sprucekit-mobile instead of duplicating it
-//!
-//! This is a copy of `sprucekit-mobile/rust/src/discover_protocols.rs`, taken to
-//! unblock the extraction. It should move into `mobile-toolkit` so both crates
-//! depend on one implementation. Tracking issue: TODO(file me).
-//!
-//! Unlike [`crate::big_stack`] — pure infrastructure where a copy is harmless —
-//! duplicating this module carries real risk, so treat the copy as temporary:
-//!
-//! - [`validate_endpoint_url`] is what stops a QR code smuggling a `file:` or
-//!   custom-scheme URL into the wallet, and restricts plain `http` to loopback.
-//! - [`read_body_capped`] bounds response size (B.4) so a hostile server cannot
-//!   exhaust wallet memory.
-//! - [`build_http_client`] centralizes TLS, redirect and timeout policy.
-//!
-//! A fix applied to one copy silently leaves the other exploitable. Worse, both
-//! crates validate the *same* URLs, so divergence means one QR code behaves
-//! differently depending on which path handles it.
-//!
-//! **The copy is also currently untested here.** The 165 lines of wiremock tests
-//! that cover this logic stayed in sprucekit (vcalm-rs has no `wiremock`
-//! dev-dependency yet), so sprucekit's copy is exercised and this one is not.
-//! Porting those tests over is the minimum bar for keeping the duplicate; moving
-//! the module into `mobile-toolkit` removes the need entirely.
-//!
-//! When the move happens, the exported `discover_protocols()` wrapper and the
-//! `uniffi::Error DiscoveryError` stay in sprucekit (they are FFI surface); only
-//! the four helpers below travel. The `uniffi` attributes are already stripped
-//! here, since vcalm-rs ships no bindings of its own.
-
 use reqwest::Client;
 use reqwest::header::ACCEPT;
 use std::collections::HashMap;
@@ -203,17 +171,10 @@ pub(crate) fn build_http_client() -> Result<Client, DiscoveryError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// Restored from `holder_legacy_tests.rs` and rehomed next to the function
-    /// it covers.
-    ///
-    /// This is the sharpest edge of the duplication debt in this module's
-    /// header: `validate_endpoint_url` is a security control, and until now the
-    /// copy here was the *untested* one of a matched pair. It no longer is.
-    ///
-    /// Still missing relative to sprucekit: the wiremock tests over
-    /// `discover_protocols` itself, plus any coverage of `read_body_capped`'s
-    /// size cap. Both need a `wiremock` dev-dependency.
     #[test]
     fn validate_endpoint_url_is_https_or_loopback() {
         let ok = |u: &str| validate_endpoint_url(&Url::parse(u).unwrap()).is_ok();
@@ -227,5 +188,145 @@ mod tests {
         assert!(!ok("http://evil.example/exchange"), "remote http rejected");
         assert!(!ok("file:///etc/passwd"), "non-http scheme rejected");
         assert!(!ok("ftp://example.com/x"));
+    }
+
+    #[tokio::test]
+    async fn initiation_interaction_runs_discovery() {
+        // Full protocol map returned when a valid interaction URL is fetched
+        // with `Accept: application/json` (§3.7.4).
+        let server = MockServer::start().await;
+        let base = server.uri();
+
+        let vcapi_url = format!("{base}/workflows/123/exchanges/987");
+        let oid4vp_url = "openid4vp://?client_id=https%3A%2F%2Fapp.example";
+
+        Mock::given(method("GET"))
+            .and(path("/interactions/z8n38Dp7a"))
+            .and(header("accept", "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "protocols": { "vcapi": vcapi_url, "OID4VP": oid4vp_url }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = discover_protocols(&format!("{base}/interactions/z8n38Dp7a?iuv=1"))
+            .await
+            .expect("all supported protocols should be returned");
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result.get("vcapi").map(String::as_str),
+            Some(vcapi_url.as_str())
+        );
+        assert_eq!(result.get("OID4VP").map(String::as_str), Some(oid4vp_url));
+    }
+
+    #[tokio::test]
+    async fn server_5xx_is_server_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/interactions/z8n38Dp7a"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let err = discover_protocols(&format!("{}/interactions/z8n38Dp7a", server.uri()))
+            .await
+            .expect_err("a 500 response must be an error");
+
+        match err {
+            DiscoveryError::ServerError { status, body } => {
+                assert_eq!(status, 500);
+                assert_eq!(body, "boom");
+            }
+            other => panic!("expected ServerError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn server_4xx_is_server_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/interactions/z8n38Dp7a"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let err = discover_protocols(&format!("{}/interactions/z8n38Dp7a", server.uri()))
+            .await
+            .expect_err("a 404 response must be an error");
+
+        assert!(matches!(
+            err,
+            DiscoveryError::ServerError { status: 404, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn non_json_body_is_deserialization_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/interactions/z8n38Dp7a"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>not json</html>"))
+            .mount(&server)
+            .await;
+
+        let err = discover_protocols(&format!("{}/interactions/z8n38Dp7a", server.uri()))
+            .await
+            .expect_err("a non-JSON body must fail to deserialize");
+
+        assert!(matches!(err, DiscoveryError::Deserialization(_)));
+    }
+
+    #[tokio::test]
+    async fn json_without_protocols_key_is_deserialization_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/interactions/z8n38Dp7a"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "foo": "bar" })))
+            .mount(&server)
+            .await;
+
+        let err = discover_protocols(&format!("{}/interactions/z8n38Dp7a", server.uri()))
+            .await
+            .expect_err("JSON missing `protocols` must be a deserialization error");
+
+        assert!(matches!(err, DiscoveryError::Deserialization(_)));
+    }
+
+    #[tokio::test]
+    async fn non_loopback_http_is_insecure() {
+        // §3.7.1/B.2 — no network involved; rejected before the request.
+        let err = discover_protocols("http://example.com/interactions/z8n38Dp7a")
+            .await
+            .expect_err("plain http to a non-loopback host must be rejected");
+        assert!(matches!(err, DiscoveryError::InsecureUrl(_)));
+    }
+
+    /// A `file:` URL — the sort a malicious QR code could smuggle in.
+    #[tokio::test]
+    async fn file_scheme_is_insecure() {
+        let err = discover_protocols("file:///etc/passwd")
+            .await
+            .expect_err("file: scheme must be rejected");
+        assert!(matches!(err, DiscoveryError::InsecureUrl(_)));
+    }
+
+    #[tokio::test]
+    async fn unsupported_iuv_version_is_invalid_url() {
+        // §3.7.1: iuv "MUST be 1 when using this version of this API".
+        let err = discover_protocols("https://example.com/interactions/z8n38Dp7a?iuv=2")
+            .await
+            .expect_err("iuv=2 is not supported");
+        assert!(matches!(err, DiscoveryError::InvalidUrl(_)));
+    }
+
+    #[tokio::test]
+    async fn malformed_url_is_invalid_url() {
+        let err = discover_protocols("not a url")
+            .await
+            .expect_err("a malformed URL must be rejected");
+        assert!(matches!(err, DiscoveryError::InvalidUrl(_)));
     }
 }

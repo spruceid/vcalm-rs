@@ -1,0 +1,76 @@
+# cargo-deny configuration.
+#
+# `cargo deny check` with no config applies cargo-deny's defaults, which allow no
+# licenses at all — that is why it failed before this file existed.
+#
+# See https://embarkstudios.github.io/cargo-deny/ for the full schema.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+# `core2 0.4.0` is yanked and pinned deliberately: it is reachable via
+# ssi -> ssi-ucan -> libipld -> libipld-core, and no unyanked 0.4.x exists. The
+# committed Cargo.lock keeps it resolvable here; consumers need the
+# `[patch.crates-io]` workaround documented in the README. Warn so the pin stays
+# visible rather than silently accepted, but do not fail CI on it.
+yanked = "warn"
+ignore = [
+    #{ id = "RUSTSEC-0000-0000", reason = "..." },
+]
+
+[licenses]
+# CANONICAL SOURCE: sprucekit-mobile/rust/deny.toml.
+#
+# This list is duplicated across sprucekit-mobile's Rust, Android (licensee),
+# iOS (check-swift-licenses.py) and Flutter (very_good) checks, and now here.
+# See the "Dependency License Checks" section of sprucekit-mobile/CLAUDE.md —
+# a change to any one of them must be made in all five.
+allow = [
+    "Apache-2.0",        # Permissive, files are untouched
+    "BSD-2-Clause",      # Permissive, files are untouched
+    "BSD-3-Clause",      # Permissive, files are untouched
+    "CC0-1.0",           # Public domain, files are untouched
+    "CDLA-Permissive-2.0", # Permissive, data is untouched
+    "ISC",               # Permissive, files are untouched
+    "MIT",               # Permissive, files are untouched
+    "MPL-2.0",           # File-level copyleft; modifications to MPL-licensed files must remain open-source
+    "Unicode-3.0",       # Permissive, files are untouched
+]
+confidence-threshold = 0.8
+
+# `sshkeys` has no machine-readable licensing information.
+# https://github.com/dnaeon/rust-sshkeys/tree/1ce4435bc36efe581fa1388b66157eca06d9543f#license
+[[licenses.clarify]]
+crate = "sshkeys"
+expression = "BSD-2-Clause"
+license-files = []
+
+# NOTE: sprucekit-mobile also clarifies `cbor-ld` and `w3c-vc-barcodes`. Neither
+# is in this crate's dependency graph, so those entries are intentionally absent.
+
+[licenses.private]
+ignore = false
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[sources.allow-org]
+# Currently unused: every dependency resolves from crates.io. Kept because the
+# `fix/multiproof-select-0.14` ssi fork may need to come back (see README,
+# "Known gap: multiproof select"), and because consumers applying the `core2`
+# patch will have a git source in their own graph.
+github = ["spruceid"]

@@ -1,114 +1,138 @@
-# vcalm-rs
+# VCALM for Rust
 
-Rust implementation of VCALM — Verifiable Credential API for Lifecycle
-Management — the holder side of a [VC API][vcapi] `vcapi` exchange.
+This library provides a Rust implementation of the **holder** side of VCALM —
+Verifiable Credential API Lifecycle Management — the `vcapi` exchange protocol
+defined by [VC API][vcapi].
 
-The crate owns the *protocol*: the exchange state machine, QueryByExample
-matching, verifiable-presentation assembly, and offer classification. It does
-**not** own credential storage, key custody, or the JSON-LD / Data Integrity
-machinery. Those are supplied by the embedding wallet through three traits.
+It owns the protocol: the exchange state machine, QueryByExample matching,
+verifiable-presentation assembly, and offer classification. It does **not** own
+credential storage, key custody, or JSON-LD verification — those come from the
+embedding wallet through three traits.
 
 [vcapi]: https://w3c-ccg.github.io/vc-api/
 
-## Integrating
+Requires Rust 1.85+ (edition 2024). All other dependencies resolve from
+crates.io.
 
-> [!IMPORTANT]
-> **Copy the `[patch.crates-io]` block below into your own workspace root.**
-> Cargo only honours `[patch]` in the top-level manifest, so the one in this
-> crate's `Cargo.toml` does nothing for you as a dependency.
+## Holder Usage
 
-```toml
-[dependencies]
-vcalm-rs = { git = "https://github.com/spruceid/vcalm-rs", rev = "..." }
-
-# Required. Without it you resolve `ssi` from crates.io and:
-#   1. miss the multiproof `select` fix that selective-disclosure derivation
-#      depends on -- SD presentations fail to verify, with no compile error; and
-#   2. likely fail to resolve at all, because ssi -> ssi-ucan -> libipld ->
-#      libipld-core requires the yanked `core2 0.4.0`.
-[patch.crates-io]
-ssi = { git = "https://github.com/spruceid/ssi", branch = "fix/multiproof-select-0.14" }
-ssi-jwk = { git = "https://github.com/spruceid/ssi", branch = "fix/multiproof-select-0.14" }
-ssi-jws = { git = "https://github.com/spruceid/ssi", branch = "fix/multiproof-select-0.14" }
-```
-
-Requires Rust 1.85+ (edition 2024).
-
-## The three ports
-
-Implement these over your own wallet, then hand them to the holder. VCALM never
-names your credential type — [`VcalmCredentialStore::Credential`] is an
-associated type, so your credentials travel through and come back out
-statically typed, with no downcast.
-
-| Trait | Supplies | Required? |
-| --- | --- | --- |
-| `VcalmCredentialStore` | `list_ids` / `get` / `add` over your credential store | yes |
-| `VcalmSigner` | the holder key that signs the VP (six methods, `ssi` types) | yes |
-| `VcalmLdEngine` | proof verification and SD derivation | **no** — defaults to `engine::SsiEngine` |
+Implement the three ports over your wallet, then drive the exchange:
 
 ```rust
 use std::sync::Arc;
 use vcalm_rs::holder::VcalmHolder;
+use vcalm_rs::exchange::StepResult;
 
 let holder = VcalmHolder::new_session(
     store,          // Arc<dyn VcalmCredentialStore<Credential = Arc<MyCredential>>>
     vec![],         // trusted DIDs (forward-looking)
     signer,         // Arc<dyn VcalmSigner>
-    context_map,    // Option<HashMap<String, String>> — your bundled JSON-LD contexts
+    context_map,    // Option<HashMap<String, String>> -- your bundled JSON-LD contexts
 ).await?;
 
-match holder.clone().start_exchange(scanned_url, None).await? {
-    StepResult::Request { .. } => { /* select credentials, submit_presentation */ }
-    StepResult::Offer { .. }   => { /* offered_credentials, then accept/reject */ }
-    StepResult::Redirect { url } => { /* terminal */ }
-    StepResult::Complete       => {}
-    StepResult::Problem { .. } => {}
+// Optionally seed the matcher from the host's own wallet, instead of the store.
+holder.provide_credentials(wallet_credentials).await;
+
+let mut step = holder.clone().start_exchange(scanned_url, None).await?;
+
+loop {
+    step = match step {
+        // The verifier wants a presentation.
+        StepResult::Request { .. } => {
+            let matched = holder.matched_credentials().await?;
+            let fields = holder.requested_fields().await?;   // for the consent UI
+            let selected = user_selects(matched, fields);
+            holder.clone().submit_presentation(selected, false).await?
+        }
+        // The issuer offered credentials.
+        StepResult::Offer { .. } => {
+            let preview = holder.offered_credentials().await?;
+            if user_accepts(preview) {
+                holder.clone().accept_offer().await?
+            } else {
+                holder.clone().reject_offer().await?
+            }
+        }
+        // Terminal.
+        StepResult::Redirect { url } => break follow(url),
+        StepResult::Complete => break,
+        StepResult::Problem { details } => break show(details),
+    };
 }
 ```
 
-### JSON-LD contexts
+## Protocol Overview
 
-VCALM bundles none. A credential whose `@context` is neither inline nor
-statically bundled in `ssi` must be resolvable from the `context_map` you pass,
-or verification fails rather than fetching it. Hosts migrating from
-`sprucekit-mobile` should pass its `default_ld_json_context()`.
+A simplified walk through the `vcapi` exchange, naming the types and methods
+that implement each step.
 
-### Overriding the engine
+### Initiation (§3.7)
 
-`engine::SsiEngine` handles verification and selective-disclosure derivation, and
-runs both on a large-stack thread (`ssi`'s context expansion overflows iOS's
-~512 KB child-thread stack, surfacing as `EXC_BAD_ACCESS code=2`). You only need
-your own when the default cannot do the job — an offline-only resolver (the
-default resolves `did:web`, which reaches the network), a trust registry,
-revocation checks, or caching:
+1. *Interaction*: the holder scans an `interaction:<url>` QR code, or
+   a bare `http(s)` URL carrying `?iuv=1`.
+2. *Protocol discovery*: [`discover_protocols`] GETs that endpoint and returns
+   the advertised `protocols` map. 
+3. *Start*: `VcalmHolder::start_exchange` resolves the exchange URL and POSTs an
+   empty `{}` message.
 
-```rust
-let holder = VcalmHolder::new_session_with_engine(
-    store, vec![], signer, context_map, my_engine,
-).await?;
+All discovery code is in the [`discover_protocols`] module.
+
+### Exchange loop (§3.6)
+
+4. Each reply is mapped to a [`StepResult`] by `exchange::classify`, based on 
+   field-presence: `verifiablePresentation` (Offer) →
+   `redirectUrl` (Redirect) → `verifiablePresentationRequest` (Request) →
+   `Complete`.
+5. The server's `referenceId` is echoed on the next request.
+
+### Presentation (§3.4)
+
+6. *Matching*: `matched_credentials` runs QueryByExample — type, `@context` and
+   recursive `credentialSubject` subset matching — over the store, per query.
+7. *Consent*: `requested_fields` reports the fields each query's `example` names,
+   for display. It is informational; `ecdsa-rdfc-2019` reveals the whole
+   credential.
+8. *Submission*: `submit_presentation` assembles a presentation, and signs it. 
+   The proof binds the VPR `challenge` and `domain` with `ProofPurpose::Authentication`.
+
+Selective disclosure activates on two gates: the VPR lists `ecdsa-sd-2023`
+**and** the matched credential carries a derivable base proof. When both hold,
+only the fields that credential's own queries named are revealed.
+
+### Issuance (§3.6.5)
+
+9. *Preview*: `offered_credentials` verifies each offered VC read-only and
+   surfaces an [`OfferedValidity`] value.
+10. *Accept*: `accept_offer` verifies **every** credential first. Any proof
+    failure aborts the whole offer and stores nothing; a valid-but-expired
+    credential is still stored, with a distinct warning.
+11. *Reject*: `reject_offer` advances without storing.
+
+## Protocol Flow Diagram
+
+```mermaid
+sequenceDiagram
+    participant Holder
+    participant Exchange as Exchange Server
+
+    Holder->>Exchange: 1. GET interaction URL (discovery)
+    Exchange-->>Holder: 2. { protocols: { vcapi, OID4VP, ... } }
+    Holder->>Exchange: 3. POST {} to the vcapi URL
+    Exchange-->>Holder: 4. Request (verifiablePresentationRequest)
+    Note over Holder: 5. Match credentials, show consent
+    Holder->>Exchange: 6. POST signed verifiablePresentation
+    Exchange-->>Holder: 7. Offer (verifiablePresentation)
+    Note over Holder: 8. Verify all, then store all
+    Holder->>Exchange: 9. POST {} to advance
+    Exchange-->>Holder: 10. Complete / Redirect / Problem
 ```
 
-If you do implement `VcalmLdEngine`, two obligations carry over: run the work on
-a large stack, and keep `VerifyOutcome::ClaimsInvalid` (expired — still
-storable) distinct from `ProofInvalid` (aborts the offer). Collapsing those turns
-every expired credential into a hard rejection.
+## Testing
 
-## Features
+```bash
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
 
-| Feature | Default | Effect |
-| --- | --- | --- |
-| `uniffi` | off | UniFFI scaffolding plus FFI derives on the wire types |
-
-Leave `uniffi` off unless you are generating bindings. It pins
-`uniffi = "=0.31.1"` exactly, and cross-crate UniFFI type unification requires
-every crate in the graph to agree on that version.
-
-Note that `VcalmHolder<C>` is generic and so cannot be a `uniffi::Object`.
-Enabling the feature exports the records, enums and error type only; the holder
-needs a monomorphized wrapper in the consuming crate.
-
-## License
-
-Licensed under either of Apache License, Version 2.0 or MIT license at your
-option.
+The suite is hermetic: HTTP is mocked with `wiremock`, and DID resolution and
+JSON-LD context loading are offline.

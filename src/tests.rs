@@ -1,48 +1,15 @@
-//! Shared test fixtures: doubles for the three ports, holder builders, and
-//! genuinely signed credentials.
-//!
-//! Named `tests` to match `sprucekit-mobile/rust/src/tests.rs`, which plays the
-//! same role (`load_jwk`, `load_signer`). Per-module `#[cfg(test)] mod tests`
-//! blocks hold the assertions; this module holds only what several of them
-//! share.
-//!
-//! Replaces what the legacy tests got from sprucekit: `VdcCollection` over
-//! `LocalStore`, the `KeySigner` double from `crate::tests`, and real
-//! `verify_raw_credential` / `JsonVc::derive_sd_vp_credential` calls.
-//!
-//! ## Scripted vs real, and why both exist
-//!
-//! The legacy accept-path tests produced genuinely signed, expired, and broken
-//! VCs, then leaned on real verification to tell them apart. That coupled the
-//! *exchange state machine* to the crypto stack: a signing regression and a
-//! state-machine regression looked identical.
-//!
-//! [`ScriptedEngine`] declares the verdict instead, so `accept_offer`'s contract
-//! — proof failure aborts everything, claims failure still stores — is tested as
-//! the branch it is, with no keys involved.
-//!
-//! The real path is covered too, by the crate's own
-//! [`crate::engine::SsiEngine`] via [`test_holder_real`]: the `sd_*` suite
-//! derives selective disclosures for real, and [`fixture_tests`] proves a
-//! signature actually round-trips. Scripted for the state machine, real for the
-//! crypto.
-
-// Some fixtures and hooks here (`sd_base_offered_vc`, `fail_derive`,
-// `derive_calls`) exist for the Wave 3 selective-disclosure tests and have no
-// caller yet. `cargo clippy --all-targets -- -D warnings` would reject them as
-// dead code, so they are allowed rather than deleted-and-rewritten later.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use ssi::JWK;
 use ssi::claims::data_integrity::CryptosuiteString;
 use ssi::claims::jws::JwsSigner;
 use ssi::crypto::Algorithm;
 use ssi::dids::{DIDKey, DIDResolver};
 use ssi::jwk::{ECParams, Params};
-use ssi::JWK;
 use uuid::Uuid;
 
 use crate::engine::SsiEngine;
@@ -117,8 +84,6 @@ impl VcalmCredentialStore for MemoryStore {
     }
 
     async fn add(&self, credential: NewCredential) -> Result<(), PortError> {
-        // Overwrite-on-duplicate-id is the contract that makes re-accepting an
-        // offer idempotent; `HashMap::insert` gives it to us directly.
         self.entries
             .lock()
             .unwrap()
@@ -127,15 +92,8 @@ impl VcalmCredentialStore for MemoryStore {
     }
 }
 
-// --- signer -----------------------------------------------------------------
-
 /// A [`VcalmSigner`] that reports a stable identity and returns its input as the
 /// "signature".
-///
-/// Enough for every path that reads `did()` — VP assembly, holder-DID
-/// negotiation — but NOT enough to produce a verifiable proof: the bytes are not
-/// a real ECDSA signature, so `crypto_utils` rejects them and signing fails.
-/// That is deliberate; anything reaching a real signature belongs in Wave 3.
 #[derive(Debug, Default)]
 pub(crate) struct FakeSigner;
 
@@ -162,20 +120,6 @@ impl VcalmSigner for FakeSigner {
     }
 }
 
-/// A real P-256 [`VcalmSigner`] over a fixed test key.
-///
-/// Needed wherever a signature must actually verify — `FakeSigner`'s bytes are
-/// rejected by `crypto_utils`, by design.
-///
-/// Two deliberate choices:
-///
-/// * The key is derived from a hard-coded scalar rather than a checked-in PEM
-///   (sprucekit uses `tests/res/sec1.pem`). Same determinism, no private-key
-///   file in the repo to be mistaken for a real one.
-/// * [`Self::sign`] returns a **DER** signature, exactly as sprucekit's
-///   `KeySigner` does, because that is what platform key custody returns. It
-///   means every signing test also exercises `crypto_utils`'s DER→raw clamp,
-///   which is the failure that would otherwise only surface at a verifier.
 #[derive(Debug)]
 pub(crate) struct P256Signer {
     jwk: JWK,
@@ -243,34 +187,20 @@ impl VcalmSigner for P256Signer {
     }
 }
 
-// --- engine -----------------------------------------------------------------
-
 /// A [`VcalmLdEngine`] whose verdicts are declared per credential `id` instead
 /// of computed from a signature.
-///
-/// Default is [`VerifyOutcome::Verified`]; override with [`Self::verdict`].
-/// [`Self::fail_derive`] makes selective-disclosure derivation error, which
-/// `accept_offer` and `build_and_sign_vp` must both treat as hard failures
-/// rather than falling back to full disclosure.
 #[derive(Default)]
 pub(crate) struct ScriptedEngine {
     verdicts: Mutex<HashMap<String, VerifyOutcome>>,
     derive_fails: Mutex<bool>,
-    /// Every `(body id, pointers)` pair passed to `derive_selective_disclosure`,
-    /// so tests can assert WHICH fields a derive was asked to reveal.
     pub(crate) derive_calls: Mutex<Vec<(String, Vec<String>)>>,
 }
 
 impl ScriptedEngine {
-    /// Verifies everything, derives by echoing the body back.
     pub(crate) fn permissive() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    /// Declare the verdict for the credential whose top-level `id` matches.
-    ///
-    /// Takes `self: Arc<Self>` rather than `&Arc<Self>` — the latter is not a
-    /// legal receiver on stable Rust.
     pub(crate) fn verdict(self: Arc<Self>, vc_id: &str, outcome: VerifyOutcome) -> Arc<Self> {
         self.verdicts
             .lock()
@@ -294,7 +224,6 @@ impl ScriptedEngine {
 
 #[async_trait::async_trait]
 impl VcalmLdEngine for ScriptedEngine {
-
     async fn verify(
         &self,
         body: &Value,
@@ -326,8 +255,6 @@ impl VcalmLdEngine for ScriptedEngine {
     }
 }
 
-// --- holder builders --------------------------------------------------------
-
 /// A holder over an empty store and a permissive engine.
 pub(crate) async fn test_holder() -> Arc<VcalmHolder<TestCredential>> {
     test_holder_with(MemoryStore::new(), ScriptedEngine::permissive()).await
@@ -335,9 +262,6 @@ pub(crate) async fn test_holder() -> Arc<VcalmHolder<TestCredential>> {
 
 /// A holder over a caller-supplied store and a scripted engine, so a test can
 /// seed credentials or declare verification verdicts.
-///
-/// Uses `new_session_with_engine` — overriding the engine is exactly what that
-/// constructor exists for.
 pub(crate) async fn test_holder_with(
     store: Arc<MemoryStore>,
     engine: Arc<ScriptedEngine>,
@@ -347,10 +271,6 @@ pub(crate) async fn test_holder_with(
         .expect("holder construction must succeed")
 }
 
-/// A holder backed by a real P-256 key but a scripted engine, for tests whose
-/// presentations must carry a valid signature while verification stays
-/// declared. Returns the signer too, so a test can build credentials bound to
-/// the holder's `did:key`.
 pub(crate) async fn test_holder_signed() -> (Arc<VcalmHolder<TestCredential>>, Arc<P256Signer>) {
     let signer = P256Signer::new();
     let holder = VcalmHolder::new_session_with_engine(
@@ -365,9 +285,6 @@ pub(crate) async fn test_holder_signed() -> (Arc<VcalmHolder<TestCredential>>, A
     (holder, signer)
 }
 
-/// A holder with real crypto throughout: a P-256 signer and the crate's default
-/// [`crate::engine::SsiEngine`]. Constructed through the plain `new_session`,
-/// so it exercises the same path an embedder takes.
 pub(crate) async fn test_holder_real(
     store: Arc<MemoryStore>,
 ) -> (Arc<VcalmHolder<TestCredential>>, Arc<P256Signer>) {
@@ -387,8 +304,6 @@ pub(crate) fn stored_credential(body: Value) -> StoredCredential<TestCredential>
         host: Arc::new(body),
     }
 }
-
-// --- credential fixtures ----------------------------------------------------
 
 /// An offered VC in the shape `accept_offer` expects. Unsigned — the
 /// [`ScriptedEngine`] decides its verdict, so no `proof` is needed.
@@ -422,22 +337,12 @@ pub(crate) fn v2_credential(given_name: &str) -> Value {
     offered_vc(&format!("urn:uuid:{}", Uuid::new_v4()), given_name)
 }
 
-// --- genuinely signed fixtures ----------------------------------------------
-
 /// Sign an unsecured credential OFFLINE, producing a real `ecdsa-rdfc-2019`
 /// issuer proof that [`SsiEngine`] accepts with no network.
-///
-/// Reuses the crate's own [`VpSigner`] glue rather than hand-rolling
-/// canonicalization — so if the signing path regresses, these fixtures stop
-/// verifying and every test built on them fails loudly.
-///
-/// `ProofPurpose::Assertion` (an issuer proof, not holder authentication), and
-/// the issuer is the signer's own `did:key` so the proof's verification method
-/// resolves offline.
 pub(crate) async fn sign_offered_vc(signer: &Arc<P256Signer>, claims: Value) -> Value {
     use crate::presentation::VpSigner;
-    use ssi::claims::vc::v1::JsonCredential;
     use ssi::claims::SignatureEnvironment;
+    use ssi::claims::vc::v1::JsonCredential;
     use ssi::dids::{AnyDidMethod, VerificationMethodDIDResolver};
     use ssi::json_ld::syntax::{Context, ContextEntry};
     use ssi::json_ld::{ContextLoader, IriRefBuf};
@@ -555,14 +460,11 @@ pub(crate) async fn proof_invalid_offered_vc(signer: &Arc<P256Signer>, id: &str)
 /// A base proof is derivation material — it cannot be verified directly, only
 /// `select`ed from. This is the input [`SsiEngine::derive_selective_disclosure`]
 /// exists to handle, and the only fixture `ScriptedEngine` cannot fake.
-pub(crate) async fn issue_sd_base_proof(
-    unsecured: Value,
-    mandatory_pointers: &[&str],
-) -> Value {
+pub(crate) async fn issue_sd_base_proof(unsecured: Value, mandatory_pointers: &[&str]) -> Value {
+    use ssi::claims::SignatureEnvironment;
     use ssi::claims::data_integrity::{
         AnyDataIntegrity, AnySignatureOptions, AnySuite, DataIntegrityDocument, ProofConfiguration,
     };
-    use ssi::claims::SignatureEnvironment;
     use ssi::dids::{AnyDidMethod, DIDResolver};
     use ssi::prelude::CryptographicSuite;
     use ssi::verification_methods::SingleSecretSigner;
@@ -629,10 +531,7 @@ pub(crate) async fn sd_base_proof_v2(given_name: &str) -> Value {
 
 /// Verify a signed VP end to end against an offline resolver.
 pub(crate) async fn verify_vp(
-    signed: &ssi::prelude::DataIntegrity<
-        ssi::prelude::AnyJsonPresentation,
-        ssi::prelude::AnySuite,
-    >,
+    signed: &ssi::prelude::DataIntegrity<ssi::prelude::AnyJsonPresentation, ssi::prelude::AnySuite>,
 ) -> bool {
     use ssi::dids::{AnyDidMethod, DIDResolver};
     use ssi::prelude::VerificationParameters;
