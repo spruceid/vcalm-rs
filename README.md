@@ -133,6 +133,3 @@ sequenceDiagram
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
-
-The suite is hermetic: HTTP is mocked with `wiremock`, and DID resolution and
-JSON-LD context loading are offline.
