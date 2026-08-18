@@ -1,10 +1,6 @@
 /// Errors that can occur while driving a VCALM `vcapi` exchange.
 #[derive(thiserror::Error, Debug)]
 pub enum VcalmError {
-    /// An unexpected foreign-callback error occurred across the FFI boundary.
-    #[error("An unexpected foreign callback error occurred: {0}")]
-    UnexpectedUniFFICallbackError(String),
-
     /// A transport-level failure (stringified `reqwest::Error`).
     #[error("Network error: {0}")]
     Network(String),

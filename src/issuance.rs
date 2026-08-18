@@ -90,9 +90,9 @@ pub(crate) fn classify_offered_entry(entry: &Value) -> OfferedEntry {
 
 /// Derive a deterministic local storage id for an offered VC (idempotency).
 ///
-/// The v5 name is SCOPED BY ISSUER (`"{issuer}\n{id}"`): `VdcCollection::add`
-/// replaces on duplicate key, so an id-only name would let a malicious issuer
-/// mint a VC whose `id` collides with — and silently overwrites — a different
+/// The v5 name is SCOPED BY ISSUER (`"{issuer}\n{id}"`): [`crate::ports::VcalmCredentialStore::add`]
+/// is contractually overwrite-on-duplicate, so an id-only name would let a malicious
+/// issuer mint a VC whose `id` collides with — and silently overwrites — a different
 /// stored credential. Same issuer re-issuing the same `id` still overwrites
 /// (intended idempotent re-accept); a different issuer claiming the same `id`
 /// gets a distinct storage slot. VCs with no usable `id` fall back to a
