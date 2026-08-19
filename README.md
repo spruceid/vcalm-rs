@@ -10,7 +10,7 @@ defined by [VC API][vcapi].
 
 ```toml
 [dependencies]
-vcalm-rs = { git = "https://github.com/spruceid/vcalm-rs", rev = "..." }
+vcalm-rs = { git = "https://github.com/spruceid/vcalm-rs", rev = "cd97bd7" }
 ```
 
 ## Holder Usage
