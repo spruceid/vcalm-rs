@@ -376,7 +376,12 @@ impl<C: Clone + Send + Sync + 'static> VcalmHolder<C> {
     /// existing `post_message` loop.
     ///
     /// `selected_credentials` are the credentials the holder/user chose (e.g. from
-    /// [`Self::matched_credentials`]). The VP is signed with `ecdsa-rdfc-2019`
+    /// [`Self::matched_credentials`]). `selected_fields` is keyed by VPR query index:
+    /// `selected_fields[&i]` is the field paths the user consented
+    /// to disclose for `vpr.query[i]`. Narrowing only takes effect
+    /// for a credential carrying an `ecdsa-sd-2023` base proof.
+    ///
+    /// The VP is signed with `ecdsa-rdfc-2019`
     /// and binds the VPR `challenge`/`domain` (§3.4.3.2) with
     /// `ProofPurpose::Authentication`. A DIDAuthentication-only request (no
     /// selected credentials) yields a signed VP with an empty
@@ -391,6 +396,7 @@ impl<C: Clone + Send + Sync + 'static> VcalmHolder<C> {
     pub async fn submit_presentation(
         self: Arc<Self>,
         selected_credentials: Vec<StoredCredential<C>>,
+        selected_fields: HashMap<u32, Vec<String>>,
         allow_domain_mismatch: bool,
     ) -> Result<StepResult, VcalmError> {
         let (vpr, exchange_url) = {
@@ -421,7 +427,9 @@ impl<C: Clone + Send + Sync + 'static> VcalmHolder<C> {
         // build+sign, exactly like `w3c_vc_barcodes` (see `crate::big_stack`).
         let holder = Arc::clone(&self);
         let signed = crate::big_stack::run_async(move || async move {
-            holder.build_and_sign_vp(&vpr, &selected_credentials).await
+            holder
+                .build_and_sign_vp(&vpr, &selected_credentials, &selected_fields)
+                .await
         })
         .await
         .map_err(|e| VcalmError::Network(format!("big-stack signing thread: {e}")))??;
@@ -883,6 +891,7 @@ impl<C: Clone + Send + Sync + 'static> VcalmHolder<C> {
         &self,
         vpr: &Vpr,
         selected_credentials: &[StoredCredential<C>],
+        selected_fields: &HashMap<u32, Vec<String>>,
     ) -> Result<ssi::prelude::DataIntegrity<AnyJsonPresentation, ssi::prelude::AnySuite>, VcalmError>
     {
         // §3.4.3.1 "holder MUST choose among" — refuse before signing when no
@@ -929,6 +938,12 @@ impl<C: Clone + Send + Sync + 'static> VcalmHolder<C> {
         // credential).
         let mut present: Vec<StoredCredential<C>> = Vec::new();
         let mut present_paths: Vec<Vec<String>> = Vec::new();
+        // `present_named_subject[i]` records whether ANY matched query named a
+        // subject field for `present[i]` BEFORE the caller's selection was applied.
+        // It distinguishes a type-only query (nothing was ever selectable ⇒ reveal
+        // the whole subject so the derived VC stays valid) from an active
+        // deselection of every subject field (⇒ honor it, never re-widen).
+        let mut present_named_subject: Vec<bool> = Vec::new();
         if resolution.is_satisfiable() {
             // SAFETY: is_satisfiable() <=> selected.is_some().
             let group_idx = resolution.selected.expect("satisfiable ⇒ a group selected");
@@ -952,6 +967,15 @@ impl<C: Clone + Send + Sync + 'static> VcalmHolder<C> {
                         }
                     }
                 }
+                let query_named_subject = query_paths
+                    .iter()
+                    .any(|p| p == "credentialSubject" || p.starts_with("credentialSubject."));
+                // Intersect the query's requested paths with selected ones, which SD derive discloses
+                let selected = selected_fields
+                    .get(&(query_idx as u32))
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                query_paths.retain(|p| selected.contains(p));
                 for cred in selected_credentials {
                     if cred.is_json_ld_vc()
                         && query
@@ -971,10 +995,12 @@ impl<C: Clone + Send + Sync + 'static> VcalmHolder<C> {
                                         present_paths[i].push(p.clone());
                                     }
                                 }
+                                present_named_subject[i] |= query_named_subject;
                             }
                             None => {
                                 present.push(cred.clone());
                                 present_paths.push(query_paths.clone());
+                                present_named_subject.push(query_named_subject);
                             }
                         }
                     }
@@ -1003,7 +1029,11 @@ impl<C: Clone + Send + Sync + 'static> VcalmHolder<C> {
             let mut presented_json: Vec<serde_json::Value> = Vec::new();
             let mut sd_derived = false;
 
-            for (cred, paths) in present.iter().zip(&present_paths) {
+            for ((cred, paths), query_named_subject) in present
+                .iter()
+                .zip(&present_paths)
+                .zip(&present_named_subject)
+            {
                 if !cred.is_json_ld_vc() {
                     // Unreachable: only credentials that passed is_json_ld_vc are
                     // collected into `present`.
@@ -1012,16 +1042,15 @@ impl<C: Clone + Send + Sync + 'static> VcalmHolder<C> {
                     ));
                 }
                 if has_sd_base_proof(&cred.body) {
-                    // GATE 2 holds — derive the selective-disclosure VC. An example
-                    // naming no subject fields (type-only, or e.g. only
-                    // `credentialStatus`) still reveals the whole subject via the
-                    // parent pointer (a derived VC without `credentialSubject`
-                    // would not be a valid VC at all).
+                    // GATE 2 holds — derive the selective-disclosure VC revealing
+                    // the selected subset of what the query named, alongside
+                    // issuer mandatory pointers. Reveals the whole subject via the
+                    // parent pointer ONLY when no matched query ever named a subject
+                    // field. When queries DID name subject fields but the caller's
+                    // selection dropped them all, honor that: reveal only the
+                    // issuer's mandatory pointers, never re-widen the deselection.
                     let mut selective_pointers = selective_pointers_from_paths(paths);
-                    let names_subject = paths
-                        .iter()
-                        .any(|p| p == "credentialSubject" || p.starts_with("credentialSubject."));
-                    if !names_subject {
+                    if !query_named_subject {
                         selective_pointers.extend(selective_pointers_from_paths(
                             std::slice::from_ref(&"credentialSubject".to_string()),
                         ));
@@ -2709,7 +2738,7 @@ mod tests {
             .expect("step 1");
 
         let err = holder
-            .submit_presentation(vec![], false)
+            .submit_presentation(vec![], HashMap::new(), false)
             .await
             .expect_err("mismatched domain must refuse by default");
         match err {
@@ -2733,7 +2762,7 @@ mod tests {
         }))
         .unwrap();
         let err = holder
-            .build_and_sign_vp(&vpr, &[])
+            .build_and_sign_vp(&vpr, &[], &HashMap::new())
             .await
             .expect_err("unsupported suite list must refuse");
         match err {
@@ -2754,7 +2783,7 @@ mod tests {
         }))
         .unwrap();
         let err = holder
-            .build_and_sign_vp(&vpr, &[])
+            .build_and_sign_vp(&vpr, &[], &HashMap::new())
             .await
             .expect_err("methods excluding `key` must refuse");
         match err {
@@ -2798,7 +2827,10 @@ mod tests {
         }))
         .unwrap();
 
-        let signed = holder.build_and_sign_vp(&vpr, &[]).await.expect("sign ok");
+        let signed = holder
+            .build_and_sign_vp(&vpr, &[], &HashMap::new())
+            .await
+            .expect("sign ok");
         let value = serde_json::to_value(&signed).unwrap();
         let holder_in_vp = value["holder"].as_str().expect("holder present");
         assert!(holder_in_vp.starts_with("did:key:"), "got {holder_in_vp}");
@@ -2818,7 +2850,10 @@ mod tests {
     async fn holder_did_method_defaults_did_key_when_accepted_methods_absent() {
         let (holder, _signer) = test_holder_signed().await;
         let vpr = qbe_vpr(); // no acceptedMethods anywhere
-        let signed = holder.build_and_sign_vp(&vpr, &[]).await.expect("sign ok");
+        let signed = holder
+            .build_and_sign_vp(&vpr, &[], &HashMap::new())
+            .await
+            .expect("sign ok");
         let value = serde_json::to_value(&signed).unwrap();
         let holder_in_vp = value["holder"].as_str().expect("holder present");
         assert!(holder_in_vp.starts_with("did:key:"), "got {holder_in_vp}");
@@ -2862,7 +2897,7 @@ mod tests {
         assert!(matches!(step1, StepResult::Request { .. }));
 
         let step2 = holder
-            .submit_presentation(vec![], false)
+            .submit_presentation(vec![], HashMap::new(), false)
             .await
             .expect("submit");
         assert_eq!(step2, StepResult::Complete);
@@ -2922,7 +2957,7 @@ mod tests {
         // DIDAuth-only (no QBE queries in this VPR) ⇒ pass no selected credentials.
         let step2 = holder
             .clone()
-            .submit_presentation(vec![], false)
+            .submit_presentation(vec![], HashMap::new(), false)
             .await
             .expect("step 2");
         match step2 {
@@ -2931,7 +2966,7 @@ mod tests {
         }
 
         let step3 = holder
-            .submit_presentation(vec![], false)
+            .submit_presentation(vec![], HashMap::new(), false)
             .await
             .expect("step 3");
         match step3 {
@@ -3002,7 +3037,7 @@ mod tests {
         // domain verifier.example while the channel is 127.0.0.1, so this also
         // exercises the explicit allow_domain_mismatch=true override.
         let step2 = holder
-            .submit_presentation(vec![cred], true)
+            .submit_presentation(vec![cred], HashMap::new(), true)
             .await
             .expect("step 2 submit");
         match step2 {
@@ -3042,7 +3077,11 @@ mod tests {
         let cred = stored_credential(sd_base_proof_v2("Jane").await);
 
         let signed = holder
-            .build_and_sign_vp(&vpr, &[cred])
+            .build_and_sign_vp(
+                &vpr,
+                &[cred],
+                &HashMap::from([(0u32, vec!["credentialSubject.givenName".to_string()])]),
+            )
             .await
             .expect("SD VP must sign");
         let value = serde_json::to_value(&signed).unwrap();
@@ -3066,6 +3105,95 @@ mod tests {
         assert!(verify_vp(&signed).await, "SD VP must verify end-to-end");
     }
 
+    /// An SD-requesting QBE VPR (lists `ecdsa-sd-2023`) over a
+    /// PermanentResidentCard, revealing BOTH `credentialSubject.givenName`
+    /// and `credentialSubject.familyName`
+    fn sd_qbe_vpr_two_fields() -> Vpr {
+        serde_json::from_value(json!({
+            "query": [{
+                "type": ["QueryByExample"],
+                "credentialQuery": {
+                    "reason": "We need your residency card.",
+                    "example": {
+                        "type": ["VerifiableCredential", "PermanentResidentCard"],
+                        "credentialSubject": { "givenName": "", "familyName": "" }
+                    }
+                }
+            }],
+            "challenge": "nonce-sd",
+            "domain": "https://verifier.example",
+            "acceptedCryptosuites": ["ecdsa-sd-2023"]
+        }))
+        .expect("valid two-field SD QBE VPR")
+    }
+
+    #[tokio::test]
+    async fn sd_honors_caller_field_deselection() {
+        // The verifier's example names givenName AND familyName, but user deselected
+        // the optional familyName. The derive must OMIT familyName.
+        let (holder, _signer) = test_holder_real(MemoryStore::new()).await;
+        let vpr = sd_qbe_vpr_two_fields();
+        let cred = stored_credential(sd_base_proof_v2("Jane").await);
+
+        let signed = holder
+            .build_and_sign_vp(
+                &vpr,
+                &[cred],
+                &HashMap::from([(0u32, vec!["credentialSubject.givenName".to_string()])]),
+            )
+            .await
+            .expect("narrowed SD VP must sign");
+        let value = serde_json::to_value(&signed).unwrap();
+
+        assert_eq!(
+            embedded_vc_cryptosuite(&value).as_deref(),
+            Some("ecdsa-sd-2023"),
+            "narrowed disclosure still rides the SD derive path, VP: {value}"
+        );
+        let vc = &value["verifiableCredential"];
+        let vc0 = vc.as_array().and_then(|a| a.first()).unwrap_or(vc);
+        assert_eq!(vc0["credentialSubject"]["givenName"], json!("Jane"));
+        assert!(
+            vc0["credentialSubject"].get("familyName").is_none(),
+            "deselected familyName must NOT be disclosed, got {:?}",
+            vc0["credentialSubject"]
+        );
+        assert!(verify_vp(&signed).await, "narrowed SD VP must verify");
+    }
+
+    #[tokio::test]
+    async fn sd_discloses_every_selected_field() {
+        // Keeping every field the verifier named discloses all of them.
+        let (holder, _signer) = test_holder_real(MemoryStore::new()).await;
+        let vpr = sd_qbe_vpr_two_fields();
+        let cred = stored_credential(sd_base_proof_v2("Jane").await);
+
+        let signed = holder
+            .build_and_sign_vp(
+                &vpr,
+                &[cred],
+                &HashMap::from([(
+                    0u32,
+                    vec![
+                        "credentialSubject.givenName".to_string(),
+                        "credentialSubject.familyName".to_string(),
+                    ],
+                )]),
+            )
+            .await
+            .expect("full-selection SD VP must sign");
+        let value = serde_json::to_value(&signed).unwrap();
+        let vc = &value["verifiableCredential"];
+        let vc0 = vc.as_array().and_then(|a| a.first()).unwrap_or(vc);
+        assert_eq!(vc0["credentialSubject"]["givenName"], json!("Jane"));
+        assert_eq!(
+            vc0["credentialSubject"]["familyName"],
+            json!("Doe"),
+            "keeping every selected field discloses all of them, got {:?}",
+            vc0["credentialSubject"]
+        );
+    }
+
     #[tokio::test]
     async fn sd_vp_binds_challenge_domain() {
         // The VP proof carries the VPR challenge/domain with
@@ -3076,7 +3204,14 @@ mod tests {
         let vpr = sd_qbe_vpr();
         let cred = stored_credential(sd_base_proof_v2("Jane").await);
 
-        let signed = holder.build_and_sign_vp(&vpr, &[cred]).await.expect("sign");
+        let signed = holder
+            .build_and_sign_vp(
+                &vpr,
+                &[cred],
+                &HashMap::from([(0u32, vec!["credentialSubject.givenName".to_string()])]),
+            )
+            .await
+            .expect("sign");
         let value = serde_json::to_value(&signed).unwrap();
         let proof = &value["proof"];
         assert_eq!(proof["challenge"], json!("nonce-sd"));
@@ -3095,7 +3230,7 @@ mod tests {
             stored_credential(signed_offered_vc(&signer, "urn:uuid:sd-fallback-1", "Jane").await);
 
         let signed = holder
-            .build_and_sign_vp(&vpr, &[cred])
+            .build_and_sign_vp(&vpr, &[cred], &HashMap::new())
             .await
             .expect("SD-unsatisfiable VPR must still sign a full VP, not error");
         let value = serde_json::to_value(&signed).unwrap();
@@ -3126,7 +3261,7 @@ mod tests {
         let cred = stored_credential(bogus);
 
         let err = holder
-            .build_and_sign_vp(&sd_qbe_vpr(), &[cred])
+            .build_and_sign_vp(&sd_qbe_vpr(), &[cred], &HashMap::new())
             .await
             .expect_err("a derive error must surface, never silently over-disclose");
         assert!(matches!(err, VcalmError::SdDeriveFailed(_)));
@@ -3157,7 +3292,11 @@ mod tests {
         .await;
 
         let signed = holder
-            .build_and_sign_vp(&sd_qbe_vpr(), &[stored_credential(v1)])
+            .build_and_sign_vp(
+                &sd_qbe_vpr(),
+                &[stored_credential(v1)],
+                &HashMap::from([(0u32, vec!["credentialSubject.givenName".to_string()])]),
+            )
             .await
             .expect("v1 SD VP signs");
         let value = serde_json::to_value(&signed).unwrap();
