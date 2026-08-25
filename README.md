@@ -43,8 +43,15 @@ loop {
         StepResult::Request { .. } => {
             let matched = holder.matched_credentials().await?;
             let fields = holder.requested_fields().await?;   // for the consent UI
-            let selected = user_selects(matched, fields);
-            holder.clone().submit_presentation(selected, false).await?
+            let (selected, selected_fields) = user_selects(matched, fields);
+            // `selected_fields: HashMap<u32, Vec<String>>`, keyed by query index.
+            // An ABSENT index means "disclose everything that query named"; a
+            // present-but-empty vec means "the user deselected every field". So
+            // `HashMap::new()` is correct when there is no per-field consent UI.
+            holder
+                .clone()
+                .submit_presentation(selected, selected_fields, false)
+                .await?
         }
         // The issuer offered credentials
         StepResult::Offer { .. } => {
@@ -97,7 +104,15 @@ advertises.
    The proof binds the VPR `challenge` and `domain` with `ProofPurpose::Authentication`.
 
 Selective disclosure activates on two gates: the VPR lists `ecdsa-sd-2023`
-**and** the matched credential carries a derivable base proof.
+**and** the matched credential carries a derivable base proof. When both hold,
+the derive reveals the fields that credential's own queries named, narrowed by
+`selected_fields`.
+
+Narrowing is deliberately constrained. Only `credentialSubject.*` paths can be
+dropped — `type`, `@context` and `credentialStatus` are structural. A selection that drops fields from a query without an explicit `"required": false`
+is refused with `VcalmError::RequiredFieldsDeselected`, and an optional query
+whose subject fields are all deselected drops that credential from the
+presentation rather than deriving a VC with no `credentialSubject`.
 
 ### Issuance (§3.6.5)
 

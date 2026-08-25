@@ -376,10 +376,10 @@ impl<C: Clone + Send + Sync + 'static> VcalmHolder<C> {
     /// existing `post_message` loop.
     ///
     /// `selected_credentials` are the credentials the holder/user chose (e.g. from
-    /// [`Self::matched_credentials`]). `selected_fields` is keyed by VPR query index:
-    /// `selected_fields[&i]` is the field paths the user consented
-    /// to disclose for `vpr.query[i]`. Narrowing only takes effect
-    /// for a credential carrying an `ecdsa-sd-2023` base proof.
+    /// [`Self::matched_credentials`]). `selected_fields` is keyed by VPR query
+    /// index: `selected_fields[&i]` is the field paths the user consented to
+    /// disclose for `vpr.query[i]`.
+    ///
     ///
     /// The VP is signed with `ecdsa-rdfc-2019`
     /// and binds the VPR `challenge`/`domain` (§3.4.3.2) with
@@ -967,15 +967,25 @@ impl<C: Clone + Send + Sync + 'static> VcalmHolder<C> {
                         }
                     }
                 }
-                let query_named_subject = query_paths
-                    .iter()
-                    .any(|p| p == "credentialSubject" || p.starts_with("credentialSubject."));
-                // Intersect the query's requested paths with selected ones, which SD derive discloses
-                let selected = selected_fields
-                    .get(&(query_idx as u32))
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                query_paths.retain(|p| selected.contains(p));
+                let query_named_subject = query_paths.iter().any(|p| is_subject_path(p));
+                // A MISSING query index means "no narrowing" (disclose everything), an explicitly present
+                // vec narrows. Note that a present-but-empty vec indicates no fields should be disclosed
+                if let Some(selected) = selected_fields.get(&(query_idx as u32)) {
+                    if query.required.unwrap_or(true) {
+                        let dropped: Vec<&str> = query_paths
+                            .iter()
+                            .filter(|p| is_subject_path(p) && !selected.contains(p))
+                            .map(String::as_str)
+                            .collect();
+                        if !dropped.is_empty() {
+                            return Err(VcalmError::RequiredFieldsDeselected {
+                                query_index: query_idx as u32,
+                                dropped: dropped.join(", "),
+                            });
+                        }
+                    }
+                    query_paths.retain(|p| !is_subject_path(p) || selected.contains(p));
+                }
                 for cred in selected_credentials {
                     if cred.is_json_ld_vc()
                         && query
@@ -1005,6 +1015,34 @@ impl<C: Clone + Send + Sync + 'static> VcalmHolder<C> {
                         }
                     }
                 }
+            }
+        }
+
+        if vpr_lists_sd_suite(vpr) {
+            let dropped: Vec<bool> = (0..present.len())
+                .map(|i| {
+                    present_named_subject[i]
+                        && !present_paths[i].iter().any(|p| is_subject_path(p))
+                        && has_sd_base_proof(&present[i].body)
+                })
+                .collect();
+            if dropped.iter().any(|&d| d) {
+                for (i, &d) in dropped.iter().enumerate() {
+                    if d {
+                        log::info!(
+                            "VCALM: dropping credential {} from the presentation — every \
+                             subject field its queries named was deselected, and a derived \
+                             VC without `credentialSubject` would not be a valid credential",
+                            present[i].id
+                        );
+                    }
+                }
+                let mut it = dropped.iter();
+                present.retain(|_| !it.next().copied().unwrap_or(false));
+                let mut it = dropped.iter();
+                present_paths.retain(|_| !it.next().copied().unwrap_or(false));
+                let mut it = dropped.iter();
+                present_named_subject.retain(|_| !it.next().copied().unwrap_or(false));
             }
         }
 
@@ -1705,6 +1743,12 @@ fn dotted_to_pointer(dotted: &str) -> String {
 /// the [`VcalmLdEngine`] port. Validity is still enforced here — a path that
 /// does not parse as an RFC 6901 pointer is dropped, exactly as before — so the
 /// adapter receives only well-formed pointers.
+
+/// If `path` is a `credentialSubject` claim, it is subject to narrowing
+fn is_subject_path(path: &str) -> bool {
+    path == "credentialSubject" || path.starts_with("credentialSubject.")
+}
+
 fn selective_pointers_from_paths(paths: &[String]) -> Vec<String> {
     paths
         .iter()
@@ -3108,18 +3152,30 @@ mod tests {
     /// An SD-requesting QBE VPR (lists `ecdsa-sd-2023`) over a
     /// PermanentResidentCard, revealing BOTH `credentialSubject.givenName`
     /// and `credentialSubject.familyName`
+    /// with no explicit `required`, so it defaults to required (§3.4.2).
     fn sd_qbe_vpr_two_fields() -> Vpr {
-        serde_json::from_value(json!({
-            "query": [{
-                "type": ["QueryByExample"],
-                "credentialQuery": {
-                    "reason": "We need your residency card.",
-                    "example": {
-                        "type": ["VerifiableCredential", "PermanentResidentCard"],
-                        "credentialSubject": { "givenName": "", "familyName": "" }
-                    }
+        sd_qbe_vpr_two_fields_with(None)
+    }
+
+    /// As above, but with `required` stated explicitly. `Some(false)` is what
+    /// makes per-field deselection legal — a required query refuses it with
+    /// [`VcalmError::RequiredFieldsDeselected`].
+    fn sd_qbe_vpr_two_fields_with(required: Option<bool>) -> Vpr {
+        let mut query = json!({
+            "type": ["QueryByExample"],
+            "credentialQuery": {
+                "reason": "We need your residency card.",
+                "example": {
+                    "type": ["VerifiableCredential", "PermanentResidentCard"],
+                    "credentialSubject": { "givenName": "", "familyName": "" }
                 }
-            }],
+            }
+        });
+        if let Some(required) = required {
+            query["required"] = json!(required);
+        }
+        serde_json::from_value(json!({
+            "query": [query],
             "challenge": "nonce-sd",
             "domain": "https://verifier.example",
             "acceptedCryptosuites": ["ecdsa-sd-2023"]
@@ -3129,10 +3185,10 @@ mod tests {
 
     #[tokio::test]
     async fn sd_honors_caller_field_deselection() {
-        // The verifier's example names givenName AND familyName, but user deselected
-        // the optional familyName. The derive must OMIT familyName.
+        // The verifier's example names givenName AND familyName on an OPTIONAL
+        // query, and the user deselected familyName. The derive must OMIT it.
         let (holder, _signer) = test_holder_real(MemoryStore::new()).await;
-        let vpr = sd_qbe_vpr_two_fields();
+        let vpr = sd_qbe_vpr_two_fields_with(Some(false));
         let cred = stored_credential(sd_base_proof_v2("Jane").await);
 
         let signed = holder
@@ -3191,6 +3247,123 @@ mod tests {
             json!("Doe"),
             "keeping every selected field discloses all of them, got {:?}",
             vc0["credentialSubject"]
+        );
+    }
+
+    #[tokio::test]
+    async fn sd_absent_query_index_discloses_everything_named() {
+        // An absent index means NO narrowing. A caller with
+        // no per-field consent UI passes an empty map and must still satisfy the
+        // verifier, so both named fields have to survive.
+        let (holder, _signer) = test_holder_real(MemoryStore::new()).await;
+        let vpr = sd_qbe_vpr_two_fields();
+        let cred = stored_credential(sd_base_proof_v2("Jane").await);
+
+        let signed = holder
+            .build_and_sign_vp(&vpr, &[cred], &HashMap::new())
+            .await
+            .expect("an empty selection map must not narrow anything");
+        let value = serde_json::to_value(&signed).unwrap();
+        let vc = &value["verifiableCredential"];
+        let vc0 = vc.as_array().and_then(|a| a.first()).unwrap_or(vc);
+
+        assert_eq!(vc0["credentialSubject"]["givenName"], json!("Jane"));
+        assert_eq!(
+            vc0["credentialSubject"]["familyName"],
+            json!("Doe"),
+            "an absent query index must disclose everything the query named, got {:?}",
+            vc0["credentialSubject"]
+        );
+    }
+
+    #[tokio::test]
+    async fn sd_deselecting_a_required_query_field_is_refused() {
+        // §3.4.2 - Every field in a QBE example id required. Dropping familyName could only produce
+        // a presentation the verifier rejects, so it must fail rather than be signed.
+        let (holder, _signer) = test_holder_real(MemoryStore::new()).await;
+        let vpr = sd_qbe_vpr_two_fields_with(Some(true));
+        let cred = stored_credential(sd_base_proof_v2("Jane").await);
+
+        let result = holder
+            .build_and_sign_vp(
+                &vpr,
+                &[cred],
+                &HashMap::from([(0u32, vec!["credentialSubject.givenName".to_string()])]),
+            )
+            .await;
+
+        match result.expect_err("dropping a required field must not sign") {
+            VcalmError::RequiredFieldsDeselected {
+                query_index,
+                dropped,
+            } => {
+                assert_eq!(query_index, 0);
+                assert!(
+                    dropped.contains("credentialSubject.familyName"),
+                    "the error must name the dropped path, got {dropped:?}"
+                );
+            }
+            other => panic!("expected RequiredFieldsDeselected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sd_deselecting_every_subject_field_drops_the_credential() {
+        // Deselecting everything on an OPTIONAL query would derive a VC carrying
+        // only the issuer's mandatory pointers. Rather than sign a structurally invalid
+        // credential, the credential leaves the presentation entirely.
+        let (holder, _signer) = test_holder_real(MemoryStore::new()).await;
+        let vpr = sd_qbe_vpr_two_fields_with(Some(false));
+        let cred = stored_credential(sd_base_proof_v2("Jane").await);
+
+        let signed = holder
+            .build_and_sign_vp(
+                &vpr,
+                &[cred],
+                &HashMap::from([(0u32, Vec::<String>::new())]),
+            )
+            .await
+            .expect("a fully deselected optional query still yields a signed VP");
+        let value = serde_json::to_value(&signed).unwrap();
+
+        let embedded = value["verifiableCredential"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(usize::from(!value["verifiableCredential"].is_null()));
+        assert_eq!(
+            embedded, 0,
+            "the fully deselected credential must be dropped, not derived without a \
+             credentialSubject; VP: {value}"
+        );
+        assert!(
+            verify_vp(&signed).await,
+            "the credential-less VP must still verify"
+        );
+    }
+
+    #[test]
+    fn sd_narrowing_never_strips_non_subject_properties() {
+        // A selection listing only subject claims must not strip them.
+        let paths = vec![
+            "type".to_string(),
+            "credentialStatus".to_string(),
+            "credentialSubject.givenName".to_string(),
+            "credentialSubject.familyName".to_string(),
+        ];
+        let selected = ["credentialSubject.givenName".to_string()];
+
+        let mut narrowed = paths.clone();
+        narrowed.retain(|p| !is_subject_path(p) || selected.contains(p));
+
+        assert_eq!(
+            narrowed,
+            vec![
+                "type".to_string(),
+                "credentialStatus".to_string(),
+                "credentialSubject.givenName".to_string(),
+            ],
+            "non-subject properties survive narrowing; only subject claims are \
+             intersected with the selection"
         );
     }
 
