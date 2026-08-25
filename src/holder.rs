@@ -380,6 +380,18 @@ impl<C: Clone + Send + Sync + 'static> VcalmHolder<C> {
     /// index: `selected_fields[&i]` is the field paths the user consented to
     /// disclose for `vpr.query[i]`.
     ///
+    /// A MISSING index means "no narrowing" — everything that query named is
+    /// disclosed; a present-but-empty vec means the user deselected every field.
+    /// Paths must equal what [`Self::requested_fields`] returned (plain string
+    /// equality, no prefix semantics). Only `credentialSubject.*` paths narrow:
+    /// structural properties like `credentialStatus` are always disclosed, since
+    /// Dropping subject paths from a query that is not explicitly
+    /// optional is refused with [`VcalmError::RequiredFieldsDeselected`]; an
+    /// optional query with every subject field deselected drops that credential
+    /// from the presentation rather than deriving a VC with no
+    /// `credentialSubject`. Narrowing takes effect only for a credential carrying
+    /// an `ecdsa-sd-2023` base proof — on the full-disclosure path
+    /// `selected_fields` is ignored.
     ///
     /// The VP is signed with `ecdsa-rdfc-2019`
     /// and binds the VPR `challenge`/`domain` (§3.4.3.2) with
@@ -1743,7 +1755,6 @@ fn dotted_to_pointer(dotted: &str) -> String {
 /// the [`VcalmLdEngine`] port. Validity is still enforced here — a path that
 /// does not parse as an RFC 6901 pointer is dropped, exactly as before — so the
 /// adapter receives only well-formed pointers.
-
 /// If `path` is a `credentialSubject` claim, it is subject to narrowing
 fn is_subject_path(path: &str) -> bool {
     path == "credentialSubject" || path.starts_with("credentialSubject.")
