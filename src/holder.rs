@@ -1097,9 +1097,9 @@ impl<C: Clone + Send + Sync + 'static> VcalmHolder<C> {
                     // the selected subset of what the query named, alongside
                     // issuer mandatory pointers. Reveals the whole subject via the
                     // parent pointer ONLY when no matched query ever named a subject
-                    // field. When queries DID name subject fields but the caller's
-                    // selection dropped them all, honor that: reveal only the
-                    // issuer's mandatory pointers, never re-widen the deselection.
+                    // field. A credential whose named subject fields were ALL
+                    // deselected never reaches this point: the drop block above
+                    // already removed it from `present`.
                     let mut selective_pointers = selective_pointers_from_paths(paths);
                     if !query_named_subject {
                         selective_pointers.extend(selective_pointers_from_paths(
