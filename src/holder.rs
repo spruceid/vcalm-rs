@@ -385,6 +385,7 @@ impl<C: Clone + Send + Sync + 'static> VcalmHolder<C> {
     /// Paths must equal what [`Self::requested_fields`] returned (plain string
     /// equality, no prefix semantics). Only `credentialSubject.*` paths narrow:
     /// structural properties like `credentialStatus` are always disclosed, since
+    /// the example names what the response credential must contain (§3.4.2).
     /// Dropping subject paths from a query that is not explicitly
     /// optional is refused with [`VcalmError::RequiredFieldsDeselected`]; an
     /// optional query with every subject field deselected drops that credential
