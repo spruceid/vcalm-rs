@@ -3289,7 +3289,7 @@ mod tests {
 
     #[tokio::test]
     async fn sd_deselecting_a_required_query_field_is_refused() {
-        // §3.4.2 - Every field in a QBE example id required. Dropping familyName could only produce
+        // §3.4.2 - Every field in a QBE example is required. Dropping familyName could only produce
         // a presentation the verifier rejects, so it must fail rather than be signed.
         let (holder, _signer) = test_holder_real(MemoryStore::new()).await;
         let vpr = sd_qbe_vpr_two_fields_with(Some(true));
