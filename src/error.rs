@@ -83,6 +83,13 @@ pub enum VcalmError {
     #[error("selective-disclosure derive failed: {0}")]
     SdDeriveFailed(String),
 
+    /// A `selected_fields` entry dropped `credentialSubject` path(s) named by a
+    /// REQUIRED query. §3.4.2 makes every field in a QueryByExample example
+    /// required, so the resulting presentation could not satisfy the verifier.
+    /// Narrow only the queries whose `required` is explicitly `false`.
+    #[error("selection dropped required field(s) [{dropped}] from required query {query_index}")]
+    RequiredFieldsDeselected { query_index: u32, dropped: String },
+
     /// A credential format/proof type this holder cannot process yet
     /// (e.g. `EnvelopedVerifiableCredential`, a `bbs-2023` base proof).
     #[error("unsupported credential format: {0}")]
